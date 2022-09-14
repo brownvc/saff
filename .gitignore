@@ -1,0 +1,11 @@
+Neural-Scene-Flow-Fields/kid-running
+Neural-Scene-Flow-Fields/nsff_scripts/models/*.pt
+Neural-Scene-Flow-Fields/nsff_scripts/models/*.pth
+Neural-Scene-Flow-Fields/nsff_scripts/*.pt
+Neural-Scene-Flow-Fields/nsff_scripts/midas*
+Neural-Scene-Flow-Fields/nsff_scripts/viz_*
+Neural-Scene-Flow-Fields/nsff_exp/logs
+Neural-Scene-Flow-Fields/nsff_scripts/*.zip
+data/*
+Neural-Scene-Flow-Fields/nsff_scripts/__pycache__/*
+Neural-Scene-Flow-Fields/nsff_exp/__pycache__/*

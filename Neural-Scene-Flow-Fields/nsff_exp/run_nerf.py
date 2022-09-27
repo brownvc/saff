@@ -14,6 +14,10 @@ from render_utils import *
 from run_nerf_helpers import *
 from load_llff import *
 
+sys.path.append("../../dino_utils")
+from extractor import *
+from sklearn.decomposition import PCA
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(1)
 DEBUG = False
@@ -35,6 +39,8 @@ def config_parser():
                         help='render fixed view + slowmo')
     parser.add_argument("--render_slowmo_bt", action='store_true', 
                         help='render space-time interpolation')
+    parser.add_argument("--render_slowmo_full", action="store_true",
+                        help="render space-time interpolation and store all information")
 
     parser.add_argument("--final_height", type=int, default=288, 
                         help='training image height, default is 512x288')
@@ -124,6 +130,9 @@ def config_parser():
 
     parser.add_argument("--w_depth",   type=float, default=0.04, 
                         help='weights of depth loss')
+    parser.add_argument("--depth_full", action='store_true', 
+                        help='enforce depth loss on full depth map instead of dynamic map only')
+
     parser.add_argument("--w_optical_flow", type=float, default=0.02, 
                         help='weights of optical flow loss')
     parser.add_argument("--w_sm", type=float, default=0.1, 
@@ -156,6 +165,27 @@ def config_parser():
     parser.add_argument("--i_weights", type=int, default=10000, 
                         help='frequency of weight ckpt saving')
 
+    # add dino args
+    parser.add_argument('--stride', default=4, type=int, help="""stride of first convolution layer. small stride -> higher resolution.""")
+    parser.add_argument('--load_size', default=128, type=int, help='load size of the input image.')
+    parser.add_argument('--model_type', default='dino_vits8', type=str,
+    help="""type of model to extract. Choose from [dino_vits8 | dino_vits16 | dino_vitb8 | dino_vitb16 | vit_small_patch8_224 | 
+            vit_small_patch16_224 | vit_base_patch8_224 | vit_base_patch16_224]""")
+    parser.add_argument('--facet', default='key', type=str, help="""facet to create descriptors from. 
+                                                                    options: ['key' | 'query' | 'value' | 'token']""")
+    parser.add_argument("--dino_batch", default=4, type=int, help="""which batch size to prevent explosion""")
+    parser.add_argument('--layer', default=11, type=int, help="layer to create descriptors from.")
+    parser.add_argument('--bin', default='False', type=str2bool, help="create a binned descriptor if True.")
+    parser.add_argument('--load_dino_size', default=128, type=int, help='load size of the input image.')
+    parser.add_argument('--dino_coe', default=0.0, type=float, help='weight of the feature loss.')
+    parser.add_argument("--shallow_dino", action='store_true', 
+                        help='use one layer as dino head')
+    parser.add_argument("--prep_dino", action='store_true', 
+                        help='preprocess dino as in D3F')              
+    parser.add_argument("--use_tanh", action='store_true',
+                        help="use tanh as in D3F")  
+    parser.add_argument("--n_components", default=64, type=int, help="pca components")  
+
     return parser
 
 
@@ -179,6 +209,60 @@ def train():
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+        
+        if args.dino_coe > 0:
+            extractor = ViTExtractor(args.model_type, args.stride, device=device)
+            # have to do this in batch otherwise blows the gpu
+            start = 0
+            feats = None
+            num_patches_list = []
+            while start < images.shape[0]:
+                #print(start)
+                batch = images[start:min(images.shape[0], start + args.dino_batch)]
+                batch = torch.tensor(batch).permute(0, 3, 1, 2)
+                height, width = batch.shape[2], batch.shape[3]
+                if height < width:
+                    dwidth = int(args.load_dino_size / float(height) * width)
+                    dheight = args.load_size
+                else:
+                    dheight = int(args.load_dino_size / float(width) * height)
+                    dwidth = args.load_size
+                batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
+                #print(batch.shape)
+                with torch.no_grad():
+                    feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
+                    feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    num_patches_list += [extractor.num_patches]*feat_raw.shape[0]
+                #feat_raw = F.interpolate(feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2), (height, width), mode="bilinear")
+                if feats is None:
+                    feats = feat_raw.permute(0, 2, 3, 1).detach().cpu()
+                else:         
+                    feats = torch.cat((feats, feat_raw.permute(0, 2, 3, 1).detach().cpu()), dim=0)
+                batch = batch.cpu()
+                feat_raw = feat_raw.detach().cpu()
+                start += args.dino_batch
+            if args.prep_dino:
+                #feat_norm = torch.linalg.norm(feats, dim=-1, keepdim=True)
+                #assert False, [torch.max(feats), torch.min(feats), feat_norm.shape]
+                #feats = feats / feat_norm
+                feats = torch.nn.functional.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None)
+                #assert False, [torch.max(feats), torch.min(feats),]
+                #assert False, feats.shape
+                old_shape = feats.shape
+                feats = feats.view(-1, feats.shape[-1])
+                pca = PCA(n_components=args.n_components).fit(feats)
+                pca_feats = pca.transform(feats)
+                #assert False, [len(num_patches_list), pca_feats.shape]
+                split_idxs = np.array([num_patches[0] * num_patches[1] for num_patches in num_patches_list])
+                split_idxs = np.cumsum(split_idxs)
+                pca_per_image = np.split(pca_feats, split_idxs[:-1], axis=0)
+                feats = torch.from_numpy(np.stack(pca_per_image, axis=0)).view(old_shape[0], old_shape[1], old_shape[2], -1)
+                #assert False, [len(pca_per_image), pca_per_image[0].shape, feats.shape]
+                #assert False, "Debugging! not finished at all; model architecture unchanged for example; better to preprocess before training"
+                
+            print("Loaded dino features ", feats.shape)
+            start = None
+        
         i_test = []
         i_val = [] #i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
@@ -224,7 +308,7 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(feats.shape[-1] if args.dino_coe > 0 else 0, args)
     global_step = start
 
     bds_dict = {
@@ -237,8 +321,7 @@ def train():
 
 
     if args.render_bt:
-        print('RENDER VIEW INTERPOLATION')
-        
+        print('RENDER VIEW INTERPOLATION')      
         render_poses = torch.Tensor(render_poses).to(device)
         print('target_idx ', target_idx)
 
@@ -259,7 +342,6 @@ def train():
 
     if args.render_lockcam_slowmo:
         print('RENDER TIME INTERPOLATION')
-
         num_img = float(poses.shape[0])
         ref_c2w = torch.Tensor(ref_c2w).to(device)
         print('target_idx ', target_idx)
@@ -276,8 +358,7 @@ def train():
             return 
 
     if args.render_slowmo_bt:
-        print('RENDER SLOW MOTION')
-
+        print('RENDER SLOW MOTION') 
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
         bt_poses = create_bt_poses(hwf) 
@@ -299,7 +380,29 @@ def train():
             # print('Done rendering', i,testsavedir)
 
         return
+    if args.render_slowmo_full:
+        print('RENDER SLOW MOTION') 
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        bt_poses = create_bt_poses(hwf) 
+        bt_poses = bt_poses * 10
 
+        with torch.no_grad():
+
+            testsavedir = os.path.join(basedir, expname, 
+                                    'render-slowmo_full_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+            os.makedirs(testsavedir, exist_ok=True)
+            images = torch.Tensor(images)#.to(device)
+
+            print('render poses shape', render_poses.shape)
+            render_slowmo_full(depths, render_poses, bt_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            gt_imgs=images, savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            target_idx=10)
+            # print('Done rendering', i,testsavedir)
+
+        return
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
     # Move training data to GPU
@@ -309,7 +412,8 @@ def train():
 
     poses = torch.Tensor(poses).to(device)
 
-    N_iters = 2000 * 1000 #1000000
+    #N_iters = 2000 * 1000 #1000000
+    N_iters = 100 * 1000
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -343,6 +447,8 @@ def train():
         depth_gt = depths[img_i].cuda()
         hard_coords = torch.Tensor(motion_coords[img_i]).cuda()
         mask_gt = masks[img_i].cuda()
+        if args.dino_coe > 0:
+            feat_gt = feats[img_i].cuda()
 
         if img_i == 0:
             flow_fwd, fwd_mask = read_optical_flow(args.datadir, img_i, 
@@ -446,6 +552,10 @@ def train():
             batch_rays = torch.stack([rays_o, rays_d], 0)
             target_rgb = target[select_coords[:, 0], 
                                 select_coords[:, 1]]  # (N_rand, 3)
+            if args.dino_coe > 0:
+                
+                target_feat = feat_gt[(select_coords[:, 0] / float(images.shape[1]) * feats.shape[1]).long(),
+                                (select_coords[:, 1] / float(images.shape[2]) * feats.shape[2]).long()]
             target_depth = depth_gt[select_coords[:, 0], 
                                 select_coords[:, 1]]
             target_mask = mask_gt[select_coords[:, 0], 
@@ -508,6 +618,14 @@ def train():
             render_loss += compute_mse(ret['rgb_map_prev_dy'], 
                                        target_rgb, 
                                        weight_map_prev.unsqueeze(-1))
+            if args.dino_coe > 0:
+                render_loss_dino = img2mse(ret['dino_map_ref_dy'], target_feat)
+                render_loss_dino += compute_mse(ret['dino_map_post_dy'],
+                                                target_feat,
+                                                weight_map_post.unsqueeze(-1))
+                render_loss_dino += compute_mse(ret['dino_map_prev_dy'],
+                                                target_feat,
+                                                weight_map_prev.unsqueeze(-1))
         else:
             print('only compute dynamic render loss in masked region')
             weights_map_dd = ret['weights_map_dd'].unsqueeze(-1).detach()
@@ -522,10 +640,24 @@ def train():
             render_loss += compute_mse(ret['rgb_map_prev_dy'], 
                                        target_rgb, 
                                        weight_map_prev.unsqueeze(-1) * weights_map_dd)
+            if args.dino_coe > 0:
+                
+                render_loss_dino = compute_mse(ret["dino_map_ref_dy"],
+                                                target_feat,
+                                                weights_map_dd)
+                render_loss_dino = compute_mse(ret["dino_map_post_dy"],
+                                                target_feat,
+                                                weight_map_post.unsqueeze(-1) * weights_map_dd)
+                render_loss_dino = compute_mse(ret["dino_map_prev_dy"],
+                                                target_feat,
+                                                weight_map_prev.unsqueeze(-1) * weights_map_dd)    
 
         # union rendering loss
         render_loss += img2mse(ret['rgb_map_ref'][:N_rand, ...], 
                                target_rgb[:N_rand, ...])
+        if args.dino_coe > 0:
+            render_loss_dino += img2mse(ret["dino_map_ref"][:N_rand, ...],
+                                    target_feat[:N_rand, ...])
 
         sf_cycle_loss = args.w_cycle * compute_mae(ret['raw_sf_ref2post'], 
                                                    -ret['raw_sf_post2ref'], 
@@ -554,8 +686,8 @@ def train():
             w_of = args.w_optical_flow/(decay_rate ** divsor)
         else:
             w_of = args.w_optical_flow
-
-        depth_loss = w_depth * compute_depth_loss(ret['depth_map_ref_dy'], -target_depth)
+        
+        depth_loss = w_depth * compute_depth_loss(ret['depth_map_ref_dy'] if not args.depth_full else ret['depth_map_ref'], -target_depth)
 
         print('w_depth ', w_depth, 'w_of ', w_of)
 
@@ -614,13 +746,20 @@ def train():
             render_loss += compute_mse(ret['rgb_map_pp_dy'], 
                                        target_rgb, 
                                        weights_map_dd)
-
-
+            if args.dino_coe > 0:
+                render_loss_dino += compute_mse(ret["dino_map_pp_dy"],
+                                            target_feat,
+                                            weights_map_dd)
+        
+        if args.dino_coe > 0:
+            render_loss_dino = args.dino_coe * render_loss_dino
         loss = sf_reg_loss + sf_cycle_loss + \
-               render_loss + flow_loss + \
+               render_loss + (render_loss_dino if args.dino_coe > 0 else 0) + flow_loss + \
                sf_sm_loss + prob_reg_loss + \
                depth_loss + entropy_loss 
 
+        if args.dino_coe > 0:
+            print('render_loss_dino ', render_loss_dino.item())
         print('render_loss ', render_loss.item(), 
               ' bidirection_loss ', sf_cycle_loss.item(), 
               ' sf_reg_loss ', sf_reg_loss.item())
@@ -672,6 +811,8 @@ def train():
             writer.add_scalar("train/loss", loss.item(), i)
             
             writer.add_scalar("train/render_loss", render_loss.item(), i)
+            if args.dino_coe > 0:
+                writer.add_scalar("train/render_loss_dino", render_loss_dino.item(), i)
             writer.add_scalar("train/depth_loss", depth_loss.item(), i)
             writer.add_scalar("train/flow_loss", flow_loss.item(), i)
             writer.add_scalar("train/prob_reg_loss", prob_reg_loss.item(), i)
@@ -757,7 +898,7 @@ def train():
                                  global_step=i, 
                                  dataformats='HW')
 
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
 
         global_step += 1
 

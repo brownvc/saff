@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from run_nerf_helpers import *
+from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEBUG = False
@@ -28,9 +29,8 @@ def splat_rgb_img(ret, ratio, R_w2t, t_w2t, j, H, W, focal, fwd_flow):
         pts_post = pts_ref + ret['raw_sf_ref2prev'][:, :, j, :]
 
     pts_post_e_G = NDC2Euclidean(pts_post, H, W, focal)
-    pts_mid_e_G = (pts_post_e_G - pts_ref_e_G) * ratio + pts_ref_e_G
-
-    pts_mid_e_local = se3_transform_points(pts_mid_e_G, 
+    pts_mid_e_G = (pts_post_e_G - pts_ref_e_G) * ratio + pts_ref_e_G   
+    pts_mid_e_local = se3_transform_points(pts_mid_e_G.to(R_w2t.device), 
                                            R_w2t.unsqueeze(0).unsqueeze(0), 
                                            t_w2t.unsqueeze(0).unsqueeze(0))
 
@@ -52,7 +52,7 @@ def splat_rgb_img(ret, ratio, R_w2t, t_w2t, j, H, W, focal, fwd_flow):
 
 
     # splatting for static nerf
-    pts_rig_e_local = se3_transform_points(pts_ref_e_G, 
+    pts_rig_e_local = se3_transform_points(pts_ref_e_G.to(R_w2t.device), 
                                            R_w2t.unsqueeze(0).unsqueeze(0), 
                                            t_w2t.unsqueeze(0).unsqueeze(0))
     
@@ -78,6 +78,91 @@ def splat_rgb_img(ret, ratio, R_w2t, t_w2t, j, H, W, focal, fwd_flow):
 
     return splat_alpha_dy, splat_rgb_dy, splat_alpha_rig, splat_rgb_rig
 
+def splat_full_img(ret, ratio, R_w2t, t_w2t, j, H, W, focal, fwd_flow, splat_raw):
+    import softsplat
+
+    assert ret["raw_dino"] is not None
+    
+    
+    pts_ref = ret['pts_ref'][:, :, j, :3]
+
+    pts_ref_e_G = NDC2Euclidean(pts_ref, H, W, focal)
+
+    if fwd_flow:
+        pts_post = pts_ref + ret['raw_sf_ref2post'][:, :, j, :]
+    else:
+        pts_post = pts_ref + ret['raw_sf_ref2prev'][:, :, j, :]
+
+    pts_post_e_G = NDC2Euclidean(pts_post, H, W, focal)
+    pts_mid_e_G = (pts_post_e_G - pts_ref_e_G) * ratio + pts_ref_e_G
+
+    pts_mid_e_local = se3_transform_points(pts_mid_e_G.to(R_w2t.device), 
+                                           R_w2t.unsqueeze(0).unsqueeze(0), 
+                                           t_w2t.unsqueeze(0).unsqueeze(0))
+
+    pts_2d_mid = perspective_projection(pts_mid_e_local, H, W, focal)
+
+    xx, yy = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))
+    xx = xx.t()
+    yy = yy.t()
+    pts_2d_original = torch.stack([xx, yy], -1)
+
+    flow_2d = pts_2d_mid - pts_2d_original
+
+    flow_2d = flow_2d.permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
+    
+    #ret["raw_dino_rigid"] = ret["raw_dino_rigid"].cuda()
+    #ret["raw_dino"] = ret["raw_dino"].cpu()
+    #for k in ret:
+    #    print(k, ret[k].device)
+    device = ret["raw_dino"].device
+    raw_rgba = torch.cat([ret['raw_rgb'].to(device), ret['raw_alpha'].unsqueeze(-1).to(device), ret["raw_dino"]], dim=-1)
+    #ret["raw_dino"] = ret["raw_dino"].cuda()
+    raw_rgba = raw_rgba[:, :, j, :].permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
+
+    splat_raw['splat_raw_rgba_dy'] = softsplat.FunctionSoftsplat(tenInput=raw_rgba, 
+                                                 tenFlow=flow_2d, 
+                                                 tenMetric=None, 
+                                                 strType='average')
+    
+    
+
+    # splatting for static nerf
+    pts_rig_e_local = se3_transform_points(pts_ref_e_G.to(R_w2t.device), 
+                                           R_w2t.unsqueeze(0).unsqueeze(0), 
+                                           t_w2t.unsqueeze(0).unsqueeze(0))
+    
+    pts_2d_rig = perspective_projection(pts_rig_e_local, H, W, focal)
+
+    flow_2d_rig = pts_2d_rig - pts_2d_original
+
+    flow_2d_rig = flow_2d_rig.permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
+    #ret["raw_dino"] = ret["raw_dino"].cuda()
+    #ret["raw_dino_rigid"] = ret["raw_dino_rigid"].cpu()
+    
+    #for k in ret:
+    #    print(k, ret[k].device)
+    device = ret["raw_dino_rigid"].device
+    raw_rgba_rig = torch.cat([ret['raw_rgb_rigid'].to(device),  ret['raw_alpha_rigid'].unsqueeze(-1).to(device), ret["raw_dino_rigid"]], dim=-1)
+    raw_rgba_rig = raw_rgba_rig[:, :, j, :].permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
+
+    splat_raw['splat_raw_rgba_rig'] = softsplat.FunctionSoftsplat(tenInput=raw_rgba_rig, 
+                                                 tenFlow=flow_2d_rig, 
+                                                 tenMetric=None, 
+                                                 strType='average')
+    
+    #assert False, [k for k in globals()]
+    softsplat = pts_ref = pts_ref_e_G = pts_post = pts_post_e_G = pts_mid_e_G = pts_mid_e_local =\
+    pts_2d_mid = xx = yy = pts_2d_original = flow_2d = raw_rgba = pts_rig_e_local = pts_2d_rig = flow_2d_rig = raw_rgba_rig = None
+    #print("I am here")
+    
+    #et["raw_dino_rigid"] = ret["raw_dino_rigid"].cuda()
+    #return splat_raw_rgba_dy, splat_raw_rgba_rig
+    #torch.cuda.empty_cache()
+    #print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+    #print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+    #print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
+
 
 from poseInterpolator import *
 
@@ -94,7 +179,7 @@ def render_slowmo_bt(disps, render_poses, bt_poses,
         H = H//render_factor
         W = W//render_factor
         focal = focal/render_factor
-
+    #assert False, [H, W, focal]
     t = time.time()
 
     count = 0
@@ -145,7 +230,7 @@ def render_slowmo_bt(disps, render_poses, bt_poses,
                         chunk=1024*16, 
                         c2w=render_pose, 
                         **render_kwargs)
-
+        
         T_i = torch.ones((1, H, W))
         final_rgb = torch.zeros((3, H, W))
         num_sample = ret1['raw_rgb'].shape[2]
@@ -189,6 +274,304 @@ def render_slowmo_bt(disps, render_poses, bt_poses,
 
         # filename = os.path.join(save_depth_dir, '{:03d}.jpg'.format(i))
         # imageio.imwrite(filename, depth8)
+
+@torch.no_grad()
+def render_slowmo_full(disps, render_poses, bt_poses, 
+                     hwf, chunk, render_kwargs, 
+                     gt_imgs=None, savedir=None, 
+                     render_factor=0, target_idx=10,
+                     depth_threshold=0.8):
+    # import scipy.io
+
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    save_img_dir = os.path.join(savedir, 'images')
+    save_img_dy_dir = os.path.join(savedir, 'images_dy')
+    save_img_rig_dir = os.path.join(savedir, 'images_rig')
+    save_dino_dir = os.path.join(savedir, 'dinos')
+    save_dino_dy_dir = os.path.join(savedir, 'dinos_dy')
+    save_dino_rig_dir = os.path.join(savedir, 'dinos_rig')
+    save_depth_dir = os.path.join(savedir, 'depths')
+    save_depth_dy_dir = os.path.join(savedir, 'depths_dy')
+    save_depth_rig_dir = os.path.join(savedir, 'depths_rig')
+    save_blend_dir = os.path.join(savedir, "blends")
+    save_pose_dir = os.path.join(savedir, "poses")
+    os.makedirs(save_img_dir, exist_ok=True)
+    os.makedirs(save_img_dy_dir, exist_ok=True)
+    os.makedirs(save_img_rig_dir, exist_ok=True)
+    os.makedirs(save_dino_dir, exist_ok=True)
+    #os.makedirs(save_dino_dy_dir, exist_ok=True)
+    #os.makedirs(save_dino_rig_dir, exist_ok=True)
+    os.makedirs(save_depth_dir, exist_ok=True)
+    os.makedirs(save_depth_dy_dir, exist_ok=True)
+    os.makedirs(save_depth_rig_dir, exist_ok=True)
+    os.makedirs(save_blend_dir, exist_ok=True)
+    os.makedirs(save_pose_dir, exist_ok=True)
+
+
+    tmp = {"T_i": None,
+        "T_i_dy": None,
+        "T_i_rig": None, 
+        "final_rgb": None,
+        "final_rgb_dy": None,
+        "final_rgb_rig": None,
+        "final_depth": None,
+        "final_depth_dy": None,
+        "final_depth_rig": None,
+        "final_dino": None,
+        "final_dino_dy": None,
+        "final_dino_rig": None,
+        "final_blend": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "alpha_final_dy": None,
+        "alpha_final_rig": None
+    }
+    
+    splat_raw_1 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+    splat_raw_2 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+
+
+    for i, cur_time in enumerate(np.linspace(target_idx - 10., target_idx + 10., 200 + 1).tolist()):
+        filename = os.path.join(save_img_dir, '{:03d}.jpg'.format(i))
+        #if os.path.exists(filename):
+        #    continue
+        flow_time = int(np.floor(cur_time))
+        ratio = cur_time - np.floor(cur_time)
+        print('cur_time ', i, cur_time, ratio)
+        t = time.time()
+
+        int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+                                                render_poses[flow_time, :3, :3],
+                                                render_poses[flow_time + 1, :3, 3], 
+                                                render_poses[flow_time + 1, :3, :3], 
+                                                ratio)
+
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+
+        num_img = gt_imgs.shape[0]
+        img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed_1 ', cur_time, img_idx_embed_1)
+
+        ret1 = render_sm(img_idx_embed_1, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        
+        #for k in ret1:
+        #    print(k)
+        #    torch.save(ret1[k], f'{savedir}/{k}_1.pt') 
+        #    ret1[k] = None
+        
+        #ret1["raw_alpha"] /= ret1["raw_blend_w"]
+        #ret1["raw_alpha_rigid"] /= 1. - ret1["raw_blend_w"]
+        ret1["raw_dino"] = ret1["raw_dino"].cpu()
+
+        ret2 = render_sm(img_idx_embed_2, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True, 
+                        **render_kwargs)
+        
+        #ret2["raw_dino"] = ret2["raw_dino"].cpu()
+        #ret2["raw_alpha"] /= ret2["raw_blend_w"]
+        #ret2["raw_alpha_rigid"] /= 1. - ret2["raw_blend_w"]
+        #assert False, [ret1["raw_alpha"].shape, ret1["raw_blend_w"].shape] 
+        
+        #assert False, "Pause"
+        tmp["T_i"] = torch.ones((1, H, W))
+        tmp["T_i_dy"] = torch.ones((1, H, W))
+        tmp["T_i_rig"] = torch.ones((1, H, W))
+        
+        tmp["final_rgb"] = torch.zeros((3, H, W))
+        tmp["final_rgb_dy"] = torch.zeros((3, H, W))
+        tmp["final_rgb_rig"] = torch.zeros((3, H, W))
+        
+        num_sample = ret1['raw_rgb'].shape[2]
+        tmp["final_depth"] = torch.zeros((1, H, W))
+        tmp["final_depth_dy"] = torch.zeros((1, H, W))
+        tmp["final_depth_rig"] = torch.zeros((1, H, W))
+
+        tmp["final_dino"] = torch.zeros((ret1["raw_dino"].shape[-1], H, W))
+        tmp["final_dino_dy"] = torch.zeros((ret1["raw_dino"].shape[-1], H, W))
+        tmp["final_dino_rig"] = torch.zeros((ret1["raw_dino"].shape[-1], H, W))
+
+        tmp["final_blend"] = torch.zeros((1, H, W))
+        
+        tmp["z_vals"] = ret1['z_vals']
+        #splat_raw_1 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+        #splat_raw_2 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+        for j in tqdm(range(0, num_sample)):
+            #start = time.time()
+            splat_full_img(ret1, ratio, tmp["R_w2t"], tmp["t_w2t"], 
+                                                            j, H, W, focal, True, splat_raw=splat_raw_1 )
+            
+            splat_full_img(ret2, 1. - ratio, tmp["R_w2t"], tmp["t_w2t"], 
+                                                            j, H, W, focal, False, splat_raw=splat_raw_2 )
+            
+
+            '''
+            splat_alpha_dy = splat_raw_rgba_dy[0, 3:4, :, :]
+            splat_rgb_dy = splat_raw_rgba_dy[0, 0:3, :, :]
+            splat_alpha_dy_dy = splat_raw_rgba_dy[0, 4:5, :, :]
+            splat_dino_dy = splat_raw_rgba_dy[0, 5:, :, :]
+
+            splat_alpha_rig = splat_raw_rgba_rig[0, 3:4, :, :]
+            splat_rgb_rig = splat_raw_rgba_rig[0, 0:3, :, :]
+            splat_alpha_rig_rig = splat_raw_rgba_rig[0, 4:5, :, :]
+            splat_blend = splat_raw_rgba_rig[0, 5:6, :, :]
+            splat_dino_rig = splat_raw_rgba_rig[0, 6:, :, :]
+            '''
+            
+            #continue
+            #assert False, "check splat_full_img is correct"
+            #assert False, "below not debugged"
+            tmp["final_rgb"] += tmp["T_i"] * (splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_dy"][0, 0:3, :, :] + \
+                                splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_rig"][0, 0:3, :, :] ) * (1.0 - ratio)
+            tmp["final_rgb"] += tmp["T_i"] * (splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_dy"][0, 0:3, :, :] + \
+                                splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_rig"][0, 0:3, :, :] ) * ratio
+            
+            tmp["final_rgb_dy"] += tmp["T_i_dy"] * splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_dy"][0, 0:3, :, :] * (1.0 - ratio)
+            tmp["final_rgb_dy"] += tmp["T_i_dy"] * splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_dy"][0, 0:3, :, :] * ratio              
+            
+            tmp["final_rgb_rig"] += tmp["T_i_rig"] * splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_rig"][0, 0:3, :, :] * (1.0 - ratio)
+            tmp["final_rgb_rig"] += tmp["T_i_rig"] * splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_rig"][0, 0:3, :, :] * ratio    
+            
+            # splat_alpha = splat_alpha1 * (1. - ratio) + splat_alpha2 * ratio
+            # final_rgb += T_i * (splat_alpha1 * (1. - ratio) * splat_rgb1 +  splat_alpha2 * ratio * splat_rgb2)
+            
+            tmp["final_dino"] += tmp["T_i"] * (splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_dy"][0, 4:, :, :] + \
+                                splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_rig"][0, 4:, :, :] ) * (1.0 - ratio)
+            tmp["final_dino"] += tmp["T_i"] * (splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_dy"][0, 4:, :, :] + \
+                                splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_rig"][0, 4:, :, :] ) * ratio
+            
+            tmp["final_dino_dy"] += tmp["T_i_dy"] * splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_dy"][0, 4:, :, :] * (1.0 - ratio)
+            tmp["final_dino_dy"] += tmp["T_i_dy"] * splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_dy"][0, 4:, :, :] * ratio              
+            
+            tmp["final_dino_rig"] += tmp["T_i_rig"] * splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_1["splat_raw_rgba_rig"][0, 4:, :, :] * (1.0 - ratio)
+            tmp["final_dino_rig"] += tmp["T_i_rig"] * splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :] * splat_raw_2["splat_raw_rgba_rig"][0, 4:, :, :] * ratio    
+
+            
+            # blending field is just coming from rigid network; no need to blend with dynamic model
+            tmp["final_blend"] += tmp["T_i"] * splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :] * (1.0 - ratio)
+            tmp["final_blend"] += tmp["T_i"] * splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :] * ratio 
+
+            tmp["alpha_final"] = (1.0 - (1. - splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]) * (1. - splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]) ) * (1. - ratio)\
+                        + (1.0 - (1. - splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]) * (1. - splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :]) ) * ratio
+            #alpha_final = alpha_1_final + alpha_2_final
+            #assert False, [T_i.device, alpha_final.device, z_vals.device]
+            tmp["final_depth"] += tmp["T_i"] * (tmp["alpha_final"]) * tmp["z_vals"][..., j].cuda()
+            tmp["T_i"] = tmp["T_i"] * (1.0 - tmp["alpha_final"] + 1e-10)
+            
+            tmp["alpha_final_dy"] = splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :] * (1. - ratio) + splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :] * ratio
+            tmp["final_depth_dy"] += tmp["T_i_dy"] * tmp["alpha_final_dy"] * tmp["z_vals"][..., j].cuda()
+            tmp["T_i_dy"] = tmp["T_i_dy"] * (1.0 - tmp["alpha_final_dy"] + 1e-10)
+
+            tmp["alpha_final_rig"] = splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :] * (1. - ratio) + splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :] * ratio
+            tmp["final_depth_rig"] += tmp["T_i_rig"] * tmp["alpha_final_rig"] * tmp["z_vals"][..., j].cuda()
+            tmp["T_i_rig"] = tmp["T_i_rig"] * (1.0 - tmp["alpha_final_rig"] + 1e-10)
+            #end = time.time()
+            #print(end-start, ": ", j, "/", num_sample)
+
+        #alpha_1_final = alpha_2_final = alpha_final = None
+        #alpha_final_dy = alpha_final_rig = None
+        filename = os.path.join(save_pose_dir, '{:03d}.pt'.format(i))
+        torch.save(torch.stack([ret1["rays_o"], ret1["rays_d"]], dim=0), filename)
+
+        
+        for k in ret1:
+        #    print(k)
+        #    torch.save(ret1[k], f'{savedir}/{k}_1.pt') 
+            ret1[k] = None
+        for k in ret2:
+            ret2[k] = None
+
+        #assert False
+        #filename = os.path.join(savedir, 'slow-mo_%03d.jpg'%(i))
+        rgb8 = to8b(tmp["final_rgb"].permute(1, 2, 0).cpu().numpy())
+        rgb8_dy = to8b(tmp["final_rgb_dy"].permute(1, 2, 0).cpu().numpy())
+        rgb8_rig = to8b(tmp["final_rgb_rig"].permute(1, 2, 0).cpu().numpy())
+        #assert False, rgb8.shape
+        #assert False, percentile(final_depth, 98)
+        depth8 = to8b(torch.clamp(tmp["final_depth"]/depth_threshold, 0., 1.).permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())
+        depth8_dy = to8b(torch.clamp(tmp["final_depth_dy"]/depth_threshold, 0., 1.).permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())
+        depth8_rig = to8b(torch.clamp(tmp["final_depth_rig"]/depth_threshold, 0., 1.).permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())
+
+        blend8 = to8b(tmp["final_blend"].permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())        
+
+        start_y = (rgb8.shape[1] - 512) // 2
+        rgb8 = rgb8[:, start_y:start_y+ 512, :]
+        rgb8_dy = rgb8_dy[:, start_y:start_y+ 512, :]
+        rgb8_rig = rgb8_rig[:, start_y:start_y+ 512, :]
+        depth8 = depth8[:, start_y:start_y+ 512, :]
+        depth8_dy = depth8_dy[:, start_y:start_y+ 512, :]
+        depth8_rig = depth8_rig[:, start_y:start_y+ 512, :]
+        blend8 = blend8[:, start_y:start_y+ 512, :]        
+
+        filename = os.path.join(save_img_dir, '{:03d}.jpg'.format(i))
+        imageio.imwrite(filename, rgb8)
+        filename = os.path.join(save_img_dy_dir, '{:03d}.jpg'.format(i))
+        imageio.imwrite(filename, rgb8_dy)
+        filename = os.path.join(save_img_rig_dir, '{:03d}.jpg'.format(i))
+        imageio.imwrite(filename, rgb8_rig)
+
+        filename = os.path.join(save_depth_dir, '{:03d}.jpg'.format(i))
+        imageio.imwrite(filename, depth8)
+        filename = os.path.join(save_depth_dy_dir, '{:03d}.jpg'.format(i))
+        imageio.imwrite(filename, depth8_dy)
+        filename = os.path.join(save_depth_rig_dir, '{:03d}.jpg'.format(i))
+        imageio.imwrite(filename, depth8_rig)
+
+        filename = os.path.join(save_blend_dir, '{:03d}.jpg'.format(i))
+        imageio.imwrite(filename, blend8)
+
+        filename = os.path.join(save_dino_dir, '{:03d}.pt'.format(i))
+        #assert False, torch.stack([tmp["final_dino"], tmp["final_dino_dy"], tmp["final_dino_rig"]], dim=0).shape
+        torch.save(torch.stack([tmp["final_dino"], tmp["final_dino_dy"], tmp["final_dino_rig"]], dim=0), filename)
+
+        #filename = os.path.join(save_dino_dy_dir, '{:03d}.pt'.format(i))
+        #torch.save(tmp["final_dino_dy"], filename)
+
+        #filename = os.path.join(save_dino_rig_dir, '{:03d}.pt'.format(i))
+        #torch.save(tmp["final_dino_rig"], filename)
+        
+        for k in tmp:
+            tmp[k] = None
+        for k in splat_raw_1:
+            splat_raw_1[k] = None
+        for k in splat_raw_2:
+            splat_raw_2[k] = None
+         
+        
+        torch.cuda.empty_cache()
 
 def render_lockcam_slowmo(ref_c2w, num_img, 
                         hwf, chunk, render_kwargs, 
@@ -327,7 +710,7 @@ def render_sm(img_idx, chain_bwd, chain_5frames,
     if ndc:
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, focal, 1., rays_o, rays_d)
-
+    
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
@@ -344,7 +727,8 @@ def render_sm(img_idx, chain_bwd, chain_5frames,
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
-
+    all_ret["rays_o"] = rays_o.view(H, W, 3)
+    all_ret["rays_d"] = rays_d.view(H, W, 3)
     return all_ret
 
 def batchify_rays_sm(img_idx, chain_bwd, chain_5frames, 
@@ -354,6 +738,10 @@ def batchify_rays_sm(img_idx, chain_bwd, chain_5frames,
 
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
+        #print(i, "/", rays_flat.shape[0])
+        #print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+        #print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+        #print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
         ret = render_rays_sm(img_idx, chain_bwd, chain_5frames, 
                             num_img, rays_flat[i:i+chunk], **kwargs)
         for k in ret:
@@ -361,18 +749,27 @@ def batchify_rays_sm(img_idx, chain_bwd, chain_5frames,
                 all_ret[k] = []
             all_ret[k].append(ret[k])
 
-    all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
-    
+    #all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret if None not in all_ret[k]}    
+    for k in all_ret:
+        if None in all_ret[k]:
+            continue
+        #print(k)
+        all_ret[k] = torch.cat(all_ret[k], 0)
+        if not k.startswith('raw_dino'):
+            all_ret[k] = all_ret[k].cpu()
+        torch.cuda.empty_cache()
     return all_ret
 
 
-def raw2rgba_blend_slowmo(raw, raw_blend_w, z_vals, rays_d, raw_noise_std=0):
+def raw2rgba_blend_slowmo(raw_dino, raw, raw_blend_w, z_vals, rays_d, raw_noise_std=0):
     """Transforms model's predictions to semantically meaningful values.
     Args:
+        raw_dino: [num_rays, num_samples along ray, dino_ch]. Prediction from model.
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
         z_vals: [num_rays, num_samples along ray]. Integration time.
         rays_d: [num_rays, 3]. Direction of each ray.
     Returns:
+        dino_map: [num_rays, dino_ch]. Estimated dino feature of a ray.
         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
         disp_map: [num_rays]. Disparity map. Inverse of depth map.
         acc_map: [num_rays]. Sum of weights along each ray.
@@ -394,10 +791,10 @@ def raw2rgba_blend_slowmo(raw, raw_blend_w, z_vals, rays_d, raw_noise_std=0):
 
     alpha = raw2alpha(raw[...,3] + noise, dists) * raw_blend_w  # [N_rays, N_samples]
 
-    return rgb, alpha
+    return raw_dino, rgb, alpha
 
 
-
+@torch.no_grad()
 def render_rays_sm(img_idx, 
                 chain_bwd,
                 chain_5frames,
@@ -416,7 +813,8 @@ def render_rays_sm(img_idx,
                 raw_noise_std=0.,
                 verbose=False,
                 pytest=False,
-                inference=True):
+                inference=True,
+                return_sem=False):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -477,31 +875,94 @@ def render_rays_sm(img_idx,
     pts_ref = torch.cat([pts, img_idx_rep], -1)
 
     # query point at time t
-    rgb_map_rig, depth_map_rig, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
+    #rgb_map_rig, depth_map_rig, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
+    #                                                                           rigid_network_query_fn, 
+    #                                                                           network_rigid, 
+    #                                                                           z_vals, rays_d, 
+    #                                                                           raw_noise_std)
+    #print("--------------------------------")
+    #print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+    #print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+    #print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
+    with torch.no_grad():
+        dino_map_rig, rgb_map_rig, depth_map_rig, raw_dino_rigid, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
                                                                                rigid_network_query_fn, 
                                                                                network_rigid, 
                                                                                z_vals, rays_d, 
                                                                                raw_noise_std)
-
+    #print("----------------ehy------------")
+    #print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+    #print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+    #print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
+    #dino_map_rig = None
+    #raw_dino_rigid = None
+    #print("----------------hehhehe------------")
+    #print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+    #print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+    #print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
+    #print("--------------------------------")
+    
     # query point at time t
     raw_ref = network_query_fn(pts_ref, viewdirs, network_fn)
+    if dino_map_rig is None:
+        dino_ch = 0
+    else:
+        dino_ch = dino_map_rig.shape[-1]
     raw_rgba_ref = raw_ref[:, :, :4]
-    raw_sf_ref2prev = raw_ref[:, :, 4:7]
-    raw_sf_ref2post = raw_ref[:, :, 7:10]
+    
+    #raw_dino_ref = None
+    
+    if dino_ch > 0:
+        raw_dino_ref = raw_ref[:, :, 4:4+dino_ch]
+    else:
+        raw_dino_ref = None
+    
+    raw_sf_ref2prev = raw_ref[:, :, 4+dino_ch:7+dino_ch]
+    raw_sf_ref2post = raw_ref[:, :, 7+dino_ch:10+dino_ch]
     # raw_blend_w_ref = raw_ref[:, :, 12]
 
-    raw_rgb, raw_alpha = raw2rgba_blend_slowmo(raw_rgba_ref, raw_blend_w, 
+    raw_dino, raw_rgb, raw_alpha = raw2rgba_blend_slowmo(raw_dino_ref, raw_rgba_ref, raw_blend_w, 
                                             z_vals, rays_d, raw_noise_std)
-    raw_rgb_rigid, raw_alpha_rigid = raw2rgba_blend_slowmo(raw_rgba_rigid, (1. - raw_blend_w), 
+    raw_dino_rigid, raw_rgb_rigid, raw_alpha_rigid = raw2rgba_blend_slowmo(raw_dino_rigid, raw_rgba_rigid, (1. - raw_blend_w), 
                                                             z_vals, rays_d, raw_noise_std)
 
+    
+    '''
+    ret = {'raw_dino': raw_dino, 'raw_rgb': raw_rgb, 'raw_alpha': raw_alpha,  
+            'raw_dino_rigid': raw_dino_rigid, 'raw_rgb_rigid':raw_rgb_rigid, 'raw_alpha_rigid':raw_alpha_rigid,
+            'raw_sf_ref2prev': raw_sf_ref2prev, 
+            'raw_sf_ref2post': raw_sf_ref2post,
+            'pts_ref':pts_ref, 'z_vals':z_vals,
+            'raw_blend_w':raw_blend_w}
+    '''
     ret = {'raw_rgb': raw_rgb, 'raw_alpha': raw_alpha,  
             'raw_rgb_rigid':raw_rgb_rigid, 'raw_alpha_rigid':raw_alpha_rigid,
             'raw_sf_ref2prev': raw_sf_ref2prev, 
             'raw_sf_ref2post': raw_sf_ref2post,
-            'pts_ref':pts_ref, 'z_vals':z_vals}
-
+            'pts_ref':pts_ref, 'z_vals':z_vals,
+            #'raw_blend_w':raw_blend_w
+            }
+    
+    '''
+    ret = {'raw_dino': raw_dino, 'raw_alpha': raw_alpha,  
+            'raw_dino_rigid':raw_dino_rigid, 'raw_alpha_rigid':raw_alpha_rigid,
+            'raw_sf_ref2prev': raw_sf_ref2prev, 
+            'raw_sf_ref2post': raw_sf_ref2post,
+            'pts_ref':pts_ref, 'z_vals':z_vals,
+            }
+    '''
+    if return_sem:
+        #for k in ret:
+        #    ret[k] = ret[k].cpu()
+        ret['raw_dino'] = raw_dino
+        ret['raw_dino_rigid'] = raw_dino_rigid
+    else:
+        for k in ret:
+            ret[k] = ret[k].cpu()
+    torch.cuda.empty_cache()
     return ret
+
+
 
 
 def batchify(fn, chunk):
@@ -545,8 +1006,8 @@ def batchify_rays(img_idx, chain_bwd, chain_5frames,
             if k not in all_ret:
                 all_ret[k] = []
             all_ret[k].append(ret[k])
-
-    all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
+    
+    all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret if None not in all_ret[k]}
     
     return all_ret
 
@@ -676,7 +1137,7 @@ def render_bullet_time(render_poses, img_idx_embed, num_img,
             # filename = os.path.join(save_depth_dir, '{:03d}.jpg'.format(i))
             # imageio.imwrite(filename, depth8)
 
-def create_nerf(args):
+def create_nerf(dino_ch, args):
     """Instantiate NeRF's MLP model.
     """
     # XYZ + T
@@ -684,13 +1145,12 @@ def create_nerf(args):
 
     input_ch_views = 0
     embeddirs_fn = None
-
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed, 3)
 
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
-    model = NeRF(D=args.netdepth, W=args.netwidth,
+    model = NeRF(use_tanh=args.use_tanh, shallow_dino=args.shallow_dino, dino_ch=dino_ch, D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
 
@@ -703,7 +1163,7 @@ def create_nerf(args):
     grad_vars = list(model.parameters())
 
     embed_fn_rigid, input_rigid_ch = get_embedder(args.multires, args.i_embed, 3)
-    model_rigid = Rigid_NeRF(D=args.netdepth, W=args.netwidth,
+    model_rigid = Rigid_NeRF(use_tanh=args.use_tanh, shallow_dino=args.shallow_dino, dino_ch=dino_ch, D=args.netdepth, W=args.netwidth,
                              input_ch=input_rigid_ch, output_ch=output_ch, skips=skips,
                              input_ch_views=input_ch_views, 
                              use_viewdirs=args.use_viewdirs).to(device)
@@ -781,7 +1241,9 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
 
-def raw2outputs_blending(raw_dy, 
+def raw2outputs_blending(raw_dino_dy,
+                        raw_dino_rigid,
+                        raw_dy, 
                          raw_rigid,
                          raw_blend_w,
                          z_vals, rays_d, 
@@ -815,7 +1277,11 @@ def raw2outputs_blending(raw_dy,
     # union map 
     rgb_map = torch.sum(weights_dy[..., None] * rgb_dy + \
                         weights_rig[..., None] * rgb_rigid, -2) 
-
+    if raw_dino_dy is not None:
+        dino_map = torch.sum(weights_dy[..., None] * raw_dino_dy + \
+                        weights_rig[..., None] * raw_dino_rigid, -2) 
+    else:
+        dino_map = None
     weights_mix = weights_dy + weights_rig
     depth_map = torch.sum(weights_mix * z_vals, -1)
 
@@ -825,13 +1291,16 @@ def raw2outputs_blending(raw_dy,
                                                                 1.-alpha_fg + 1e-10], -1), -1)[:, :-1]
     depth_map_fg = torch.sum(weights_fg * z_vals, -1)
     rgb_map_fg = torch.sum(weights_fg[..., None] * rgb_dy, -2) 
-
-    return rgb_map, depth_map, \
-           rgb_map_fg, depth_map_fg, weights_fg, \
+    if raw_dino_dy is not None:
+        dino_map_fg = torch.sum(weights_fg[..., None] * raw_dino_dy, -2)
+    else:
+        dino_map_fg = None
+    return dino_map, rgb_map, depth_map, \
+           dino_map_fg, rgb_map_fg, depth_map_fg, weights_fg, \
            weights_dy
 
 
-def raw2outputs_warp(raw_p, 
+def raw2outputs_warp(raw_dino, raw_p, 
                      z_vals, rays_d, 
                      raw_noise_std=0):
 
@@ -853,13 +1322,16 @@ def raw2outputs_warp(raw_p,
 
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
-
+    if raw_dino is not None:
+        dino_map = torch.sum(weights[..., None] * raw_dino, -2)
+    else:
+        dino_map = None
     depth_map = torch.sum(weights * z_vals, -1)
 
-    return rgb_map, depth_map, weights#, alpha #alpha#, 1. - probs
+    return dino_map, rgb_map, depth_map, weights#, alpha #alpha#, 1. - probs
 
 
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(raw_dino, raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -893,8 +1365,12 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     depth_map = torch.sum(weights * z_vals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
 
+    if raw_dino is None:
+        dino_map = None
+    else:
+        dino_map = torch.sum(weights[..., None] * raw_dino, -2) 
 
-    return rgb_map, weights, depth_map
+    return dino_map, rgb_map, weights, depth_map
 
 def get_rigid_outputs(pts, viewdirs, 
                       network_query_fn, 
@@ -906,13 +1382,17 @@ def get_rigid_outputs(pts, viewdirs,
     # with torch.no_grad():        
     raw_rigid = network_query_fn(pts[..., :3], viewdirs, network_rigid)
     raw_rgba_rigid = raw_rigid[..., :4]
-    raw_blend_w = raw_rigid[..., 4:]
-
-    rgb_map_rig, weights_rig, depth_map_rig = raw2outputs(raw_rgba_rigid, z_vals, rays_d, 
+    if network_rigid.module.dino_ch > 0:
+        raw_dino_rigid = raw_rigid[..., 4:4+network_rigid.module.dino_ch]
+    else:
+        raw_dino_rigid = None
+    raw_blend_w = raw_rigid[..., 4+network_rigid.module.dino_ch:]
+    
+    dino_map_rig, rgb_map_rig, weights_rig, depth_map_rig = raw2outputs(raw_dino_rigid, raw_rgba_rigid, z_vals, rays_d, 
                                                           raw_noise_std, 
                                                           white_bkgd=False)
 
-    return rgb_map_rig, depth_map_rig, raw_rgba_rigid, raw_blend_w[..., 0]
+    return dino_map_rig, rgb_map_rig, depth_map_rig, raw_dino_rigid, raw_rgba_rigid, raw_blend_w[..., 0]
 
 
 def compute_2d_prob(weights_p_mix, 
@@ -1001,30 +1481,37 @@ def render_rays(img_idx,
     pts_ref = torch.cat([pts, img_idx_rep], -1)
 
     # query point at time t
-    rgb_map_rig, depth_map_rig, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
+    dino_map_rig, rgb_map_rig, depth_map_rig, raw_dino_rigid, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
                                                                                rigid_network_query_fn, 
                                                                                network_rigid, 
                                                                                z_vals, rays_d, 
                                                                                raw_noise_std)
 
-
     raw_ref = network_query_fn(pts_ref, viewdirs, network_fn)
     raw_rgba_ref = raw_ref[:, :, :4]
-    raw_sf_ref2prev = raw_ref[:, :, 4:7]
-    raw_sf_ref2post = raw_ref[:, :, 7:10]
+    if dino_map_rig is not None:
+        dino_ch = dino_map_rig.shape[-1]
+        raw_dino_ref = raw_ref[:, :, 4:4+dino_ch]
+    else:
+        dino_ch = 0
+        raw_dino_ref = None
+    raw_sf_ref2prev = raw_ref[:, :, 4+dino_ch:7+dino_ch]
+    raw_sf_ref2post = raw_ref[:, :, 7+dino_ch:10+dino_ch]
     # raw_blend_w_ref = raw_ref[:, :, 12]
 
-    rgb_map_ref, depth_map_ref, \
-    rgb_map_ref_dy, depth_map_ref_dy, weights_ref_dy, \
-    weights_ref_dd = raw2outputs_blending(raw_rgba_ref, raw_rgba_rigid,
+    dino_map_ref, rgb_map_ref, depth_map_ref, \
+    dino_map_ref_dy, rgb_map_ref_dy, depth_map_ref_dy, weights_ref_dy, \
+    weights_ref_dd = raw2outputs_blending(raw_dino_ref, raw_dino_rigid,
+                                          raw_rgba_ref, raw_rgba_rigid,
                                           raw_blend_w,
                                           z_vals, rays_d, 
                                           raw_noise_std)
 
     weights_map_dd = torch.sum(weights_ref_dd, -1).detach()
 
-    ret = {'rgb_map_ref': rgb_map_ref, 'depth_map_ref' : depth_map_ref,  
-            'rgb_map_rig':rgb_map_rig, 'depth_map_rig':depth_map_rig, 
+    ret = {'dino_map_ref': dino_map_ref, 'rgb_map_ref': rgb_map_ref, 'depth_map_ref' : depth_map_ref,  
+            'dino_map_rig': dino_map_rig, 'rgb_map_rig':rgb_map_rig, 'depth_map_rig':depth_map_rig, 
+            'dino_map_ref_dy': dino_map_ref_dy,
             'rgb_map_ref_dy':rgb_map_ref_dy, 
             'depth_map_ref_dy':depth_map_ref_dy, 
             'weights_map_dd': weights_map_dd}
@@ -1037,7 +1524,7 @@ def render_rays(img_idx,
         ret['raw_pts_ref'] = pts_ref[:, :, :3]
         ret['weights_ref_dy'] = weights_ref_dy
         ret['raw_blend_w'] = raw_blend_w
-
+    
     img_idx_rep_post = torch.ones_like(pts[:, :, 0:1]) * (img_idx + 1./num_img * 2. )
     pts_post = torch.cat([(pts_ref[:, :, :3] + raw_sf_ref2post), img_idx_rep_post] , -1)
 
@@ -1047,33 +1534,41 @@ def render_rays(img_idx,
     # render points at t - 1
     raw_prev = network_query_fn(pts_prev, viewdirs, network_fn)
     raw_rgba_prev = raw_prev[:, :, :4]
-    raw_sf_prev2prevprev = raw_prev[:, :, 4:7]
-    raw_sf_prev2ref = raw_prev[:, :, 7:10]
+    if dino_ch > 0:
+        raw_dino_prev = raw_prev[:, :, 4:4+dino_ch]
+    else:
+        raw_dino_prev = None
+    raw_sf_prev2prevprev = raw_prev[:, :, 4+dino_ch:7+dino_ch]
+    raw_sf_prev2ref = raw_prev[:, :, 7+dino_ch:10+dino_ch]
 
     # render from t - 1
-    rgb_map_prev_dy, _, weights_prev_dy = raw2outputs_warp(raw_rgba_prev,
+    dino_map_prev_dy, rgb_map_prev_dy, _, weights_prev_dy = raw2outputs_warp(raw_dino_prev, raw_rgba_prev,
                                                            z_vals, rays_d, 
                                                            raw_noise_std)
 
-
+    ret['dino_map_prev_dy'] = dino_map_prev_dy
     ret['raw_sf_prev2ref'] = raw_sf_prev2ref
     ret['rgb_map_prev_dy'] = rgb_map_prev_dy
     
     # render points at t + 1
     raw_post = network_query_fn(pts_post, viewdirs, network_fn)
     raw_rgba_post = raw_post[:, :, :4]
-    raw_sf_post2ref = raw_post[:, :, 4:7]
-    raw_sf_post2postpost = raw_post[:, :, 7:10]
+    if dino_ch > 0:
+        raw_dino_post = raw_post[:, :, 4:4+dino_ch]
+    else:
+        raw_dino_post = None
+    raw_sf_post2ref = raw_post[:, :, 4+dino_ch:7+dino_ch]
+    raw_sf_post2postpost = raw_post[:, :, 7+dino_ch:10+dino_ch]
 
-    rgb_map_post_dy, _, weights_post_dy = raw2outputs_warp(raw_rgba_post,
+    dino_map_post_dy, rgb_map_post_dy, _, weights_post_dy = raw2outputs_warp(raw_dino_post, raw_rgba_post,
                                                            z_vals, rays_d, 
                                                            raw_noise_std)
-
+    ret["dino_map_post_dy"] = dino_map_post_dy
     ret['raw_sf_post2ref'] = raw_sf_post2ref
     ret['rgb_map_post_dy'] = rgb_map_post_dy
 
-    raw_prob_ref2prev = raw_ref[:, :, 10]
-    raw_prob_ref2post = raw_ref[:, :, 11]
+    raw_prob_ref2prev = raw_ref[:, :, 10+dino_ch]
+    raw_prob_ref2post = raw_ref[:, :, 11+dino_ch]
 
     prob_map_prev = compute_2d_prob(weights_prev_dy,
                                     raw_prob_ref2prev)
@@ -1099,12 +1594,16 @@ def render_rays(img_idx,
         if chain_5frames:
             raw_prevprev = network_query_fn(pts_prevprev, viewdirs, network_fn)
             raw_rgba_prevprev = raw_prevprev[:, :, :4]
+            if dino_ch > 0:
+                raw_dino_prevprev = raw_prevprev[:, :, 4:4+dino_ch]
+            else:
+                raw_dino_prevprev = None
 
             # render from t - 2
-            rgb_map_prevprev_dy, _, weights_prevprev_dy = raw2outputs_warp(raw_rgba_prevprev, 
+            dino_map_prevprev_dy, rgb_map_prevprev_dy, _, weights_prevprev_dy = raw2outputs_warp(raw_dino_prevprev, raw_rgba_prevprev, 
                                                                            z_vals, rays_d, 
                                                                            raw_noise_std)
-
+            ret['dino_map_pp_dy'] = dino_map_prevprev_dy
             ret['rgb_map_pp_dy'] = rgb_map_prevprev_dy
 
     else:
@@ -1116,12 +1615,16 @@ def render_rays(img_idx,
         if chain_5frames:
             raw_postpost = network_query_fn(pts_postpost, viewdirs, network_fn)
             raw_rgba_postpost = raw_postpost[:, :, :4]
+            if dino_ch > 0:
+                raw_dino_postpost = raw_postpost[:, :, 4:4+dino_ch]
+            else:
+                raw_dino_postpost = None
 
             # render from t + 2
-            rgb_map_postpost_dy, _, weights_postpost_dy = raw2outputs_warp(raw_rgba_postpost, 
+            dino_map_postpost_dy, rgb_map_postpost_dy, _, weights_postpost_dy = raw2outputs_warp(raw_dino_postpost, raw_rgba_postpost, 
                                                                            z_vals, rays_d, 
                                                                            raw_noise_std)
-
+            ret["dino_map_pp_dy"] = dino_map_postpost_dy
             ret['rgb_map_pp_dy'] = rgb_map_postpost_dy
 
 

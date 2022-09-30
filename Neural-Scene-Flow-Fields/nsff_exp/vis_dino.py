@@ -23,7 +23,8 @@ def preprocess_feats(feats, sample_interval, skip_norm=False):
 @torch.no_grad()
 def load_feats(root_dir, sample_interval, max_cluster, load_size, stride, model_type, facet, layer, bin, elbow, remove_outliers, votes_percentage, thresh, save_png=True, depth_ratio=10, pixel_ratio=10, pts_ratio=10, use_gt_dino=False,
             use_gt_sal=False,
-            prep_dino=True):
+            prep_dino=True,
+            load_algo=''):
     feat_files = sorted([os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith('.pt')])
     feats = []
     num_patches_list = []
@@ -43,6 +44,7 @@ def load_feats(root_dir, sample_interval, max_cluster, load_size, stride, model_
             break
         try:
             feat = torch.load(feat_file)[0]
+            #assert False, feat.shape
             num_patches_list.append((feat.shape[-2], feat.shape[-1]))
             if use_gt_dino or use_gt_sal:
                 batch, _ = extractor.preprocess(feat_file.replace('dinos', 'images').replace('.pt', '.jpg'), load_size)
@@ -70,16 +72,21 @@ def load_feats(root_dir, sample_interval, max_cluster, load_size, stride, model_
                 feat = torch.nn.functional.interpolate(descs.permute(0, 3, 1, 2), size=num_patches_list[-1], mode="bilinear")[0]
                 #batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
                 #assert False, [feat.shape, descs.shape]
+            #assert False, feat.shape
             feats.append(feat.view(feat.shape[0], -1).permute(1, 0))
+            
             if use_gt_sal:
                 saliency_map = saliency_extractor.extract_saliency_maps(batch.to(feat.device))
+                
                 saliency_map = saliency_map.view(batch.shape[0], saliency_extractor.num_patches[0], saliency_extractor.num_patches[1], -1)
                 saliency_map = torch.nn.functional.interpolate(saliency_map.permute(0, 3, 1, 2), size=num_patches_list[-1], mode="nearest")[0]
+                #assert False, saliency_map.shape
                 saliency_maps_list.append(saliency_map[0].view(-1).cpu().numpy())
                 #assert False, saliency_map.shape
                 
             if use_depth or use_pts:
                 depth = cv2.imread(feat_file.replace('dinos', 'depths').replace('.pt', '.jpg'), cv2.IMREAD_GRAYSCALE)/255.
+                #assert False, feat_file.replace('dinos', 'depths').replace('.pt', '.jpg')
             if use_depth:
                 #print(feat_file.replace('dinos', 'depths').replace('.pt', '.jpg'))
                 depths.append(torch.from_numpy(depth).view(-1, 1))
@@ -101,7 +108,9 @@ def load_feats(root_dir, sample_interval, max_cluster, load_size, stride, model_
                 #assert False, [torch.max(points[..., 0]), torch.min(points[..., 0]),
                 #torch.max(points[..., 1]), torch.min(points[..., 1]),
                 #torch.max(points[..., 2]), torch.min(points[..., 2]),]
+                #assert False, points.shape
                 pts.append(points.view(-1, 3))
+                
 
         except Exception as e: 
             print(e)
@@ -132,30 +141,52 @@ def load_feats(root_dir, sample_interval, max_cluster, load_size, stride, model_
     #assert False, np.unique(normalized_all_sampled_depths)
     #assert False, [normalized_all_sampled_descriptors.shape, normalized_all_descriptors.shape]
 
-    sum_of_squared_dists = []
-    n_cluster_range = list(range(1, max_cluster))
-    for n_clusters in n_cluster_range:
-        algorithm = faiss.Kmeans(d=normalized_all_sampled_descriptors.shape[1], k=n_clusters, niter=300, nredo=10)
-        algorithm.train(normalized_all_sampled_descriptors.astype(np.float32))
+    if load_algo != '':
+        n_clusters = int(load_algo.split("/")[-1].split("_")[1])
+        sample_data = np.load(load_algo.replace('centroids', 'sample'))
+        #assert False, [load_algo, n_clusters]
+        algorithm = faiss.Kmeans(d=sample_data.shape[1], k=n_clusters, niter=300, nredo=10)
+        centroids = np.load(load_algo)
+        algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
         squared_distances, labels = algorithm.index.search(normalized_all_descriptors.astype(np.float32), 1)
-        objective = squared_distances.sum()
-        sum_of_squared_dists.append(objective / normalized_all_descriptors.shape[0])
-        if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):
-            break
+            
+    else:
+        sum_of_squared_dists = []
+        n_cluster_range = list(range(1, max_cluster))
+        for n_clusters in n_cluster_range:
+            algorithm = faiss.Kmeans(d=normalized_all_sampled_descriptors.shape[1], k=n_clusters, niter=300, nredo=10)
+            algorithm.train(normalized_all_sampled_descriptors.astype(np.float32))
+            squared_distances, labels = algorithm.index.search(normalized_all_descriptors.astype(np.float32), 1)
+            objective = squared_distances.sum()
+            sum_of_squared_dists.append(objective / normalized_all_descriptors.shape[0])
+            if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):
+                
+                break
+        image_path = '/'.join(feat_files[i].split('/')[:-1])
+        #assert False, image_path+f"/centroids_{n_clusters}_{depth_ratio}_{pixel_ratio}_{pts_ratio}_{use_gt_dino}.npy"
+        with open(image_path+f"/centroids_{n_clusters}_{depth_ratio}_{pixel_ratio}_{pts_ratio}_{use_gt_dino}.npy", "wb") as f:
+            np.save(f, algorithm.centroids)
+        with open(image_path+f"/sample_{n_clusters}_{depth_ratio}_{pixel_ratio}_{pts_ratio}_{use_gt_dino}.npy", "wb") as f:
+            np.save(f, normalized_all_sampled_descriptors)
     #assert False, labels.shape
     num_labels = np.max(n_clusters) + 1
     num_descriptors_per_image = [num_patches[0]*num_patches[1] for num_patches in num_patches_list]
     labels_per_image = np.split(labels, np.cumsum(num_descriptors_per_image))
     #assert False, normalized_all_sampled_descriptors.shape
     if use_gt_sal:
-        votes = np.zeros(num_labels)
-        for image_labels, saliency_map in zip(labels_per_image, saliency_maps_list):
-            for label in range(num_labels):
-                label_saliency = saliency_map[image_labels[:, 0] == label].mean()
-                if label_saliency > thresh:
-                    votes[label] += 1
-        salient_labels = np.where(votes >= np.ceil(num_images * votes_percentage / 100))
-        
+        if load_algo != '':
+            salient_labels = np.load(load_algo.replace('centroids', 'salient'))
+        else:
+            votes = np.zeros(num_labels)
+            for image_labels, saliency_map in zip(labels_per_image, saliency_maps_list):
+                for label in range(num_labels):
+                    label_saliency = saliency_map[image_labels[:, 0] == label].mean()
+                    if label_saliency > thresh:
+                        votes[label] += 1
+            salient_labels = np.where(votes >= np.ceil(num_images * votes_percentage / 100))
+            with open(image_path+f"/salient_{n_clusters}_{depth_ratio}_{pixel_ratio}_{pts_ratio}_{use_gt_dino}.npy", "wb") as f:
+                np.save(f, salient_labels)      
     if save_png:
         cmap = 'jet' if num_labels > 10 else 'tab10'
         for i, (num_patches, label_per_image) in enumerate(zip(num_patches_list, labels_per_image)):
@@ -208,10 +239,12 @@ if __name__ == "__main__":
     parser.add_argument('--layer', default=11, type=int, help="layer to create descriptors from.")
     parser.add_argument('--bin', default='False', type=str2bool, help="create a binned descriptor if True.")
     parser.add_argument('--remove_outliers', default='False', type=str2bool, help="Remove outliers using cls token.")
+    parser.add_argument('--load_algo', default='', type=str, help="load a trained kmeans or not")
 
     args = parser.parse_args()
 
     feats = load_feats(args.root_dir, sample_interval=100, max_cluster=args.max_cluster, elbow=0.975, use_gt_dino=args.use_gt_dino, use_gt_sal=args.use_gt_sal, depth_ratio=args.depth_ratio, pixel_ratio=args.pixel_ratio,
         pts_ratio=args.pts_ratio,
         load_size=args.load_size, stride=args.stride, model_type=args.model_type, facet=args.facet, layer=args.layer, bin=args.bin, remove_outliers=args.remove_outliers,
-        votes_percentage=args.votes_percentage, thresh=args.thresh)
+        votes_percentage=args.votes_percentage, thresh=args.thresh,
+        load_algo=args.load_algo)

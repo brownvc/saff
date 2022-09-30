@@ -16,7 +16,9 @@ from load_llff import *
 
 sys.path.append("../../dino_utils")
 from extractor import *
+from cosegmentation import *
 from sklearn.decomposition import PCA
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(1)
@@ -41,6 +43,13 @@ def config_parser():
                         help='render space-time interpolation')
     parser.add_argument("--render_slowmo_full", action="store_true",
                         help="render space-time interpolation and store all information")
+    parser.add_argument("--render_pcd_color", action="store_true",
+                        help="render colored point cloud")
+    parser.add_argument("--render_pcd_cluster", action="store_true",
+                        help="render clustered point cloud")
+    parser.add_argument("--load_algo", type=str,
+                        help="clustering algorithm to use")
+
 
     parser.add_argument("--final_height", type=int, default=288, 
                         help='training image height, default is 512x288')
@@ -185,7 +194,7 @@ def config_parser():
     parser.add_argument("--use_tanh", action='store_true',
                         help="use tanh as in D3F")  
     parser.add_argument("--n_components", default=64, type=int, help="pca components")  
-
+    
     return parser
 
 
@@ -403,6 +412,61 @@ def train():
             # print('Done rendering', i,testsavedir)
 
         return
+    if args.render_pcd_color:
+        print('RENDER pcd color')
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        bt_poses = create_bt_poses(hwf) 
+        bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'render-pcd_color-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            render_pcd_color(render_poses, bt_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            gt_imgs=images, savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            target_idx=10)
+        return
+    
+    if args.render_pcd_cluster:
+        print('RENDER pcd cluster')
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        bt_poses = create_bt_poses(hwf) 
+        bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'render-pcd_cluster-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        n_clusters = int(args.load_algo.split("/")[-1].split("_")[1])
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=n_clusters, niter=300, nredo=10)
+        centroids = np.load(args.load_algo)
+        sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        algorithm.centroids = centroids
+        algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
+        
+            
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            render_pcd_cluster(algorithm, centroids, salient_labels, render_poses, bt_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            gt_imgs=images, savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            target_idx=10)
+        return
+
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
     # Move training data to GPU

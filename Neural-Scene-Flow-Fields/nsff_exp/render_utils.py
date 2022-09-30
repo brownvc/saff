@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from run_nerf_helpers import *
 from tqdm import tqdm
+import open3d as o3d
+from vis_dino import *
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEBUG = False
@@ -78,6 +80,7 @@ def splat_rgb_img(ret, ratio, R_w2t, t_w2t, j, H, W, focal, fwd_flow):
 
     return splat_alpha_dy, splat_rgb_dy, splat_alpha_rig, splat_rgb_rig
 
+
 def splat_full_img(ret, ratio, R_w2t, t_w2t, j, H, W, focal, fwd_flow, splat_raw):
     import softsplat
 
@@ -116,44 +119,51 @@ def splat_full_img(ret, ratio, R_w2t, t_w2t, j, H, W, focal, fwd_flow, splat_raw
     #for k in ret:
     #    print(k, ret[k].device)
     device = ret["raw_dino"].device
-    raw_rgba = torch.cat([ret['raw_rgb'].to(device), ret['raw_alpha'].unsqueeze(-1).to(device), ret["raw_dino"]], dim=-1)
+    raw_rgba = torch.cat([ret['raw_rgb'][:, :, j, :].to(device), ret['raw_alpha'][:, :, j].unsqueeze(-1).to(device), ret["raw_dino"][:, :, j, :]], dim=-1)
     #ret["raw_dino"] = ret["raw_dino"].cuda()
-    raw_rgba = raw_rgba[:, :, j, :].permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
+    raw_rgba = raw_rgba.permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
 
     splat_raw['splat_raw_rgba_dy'] = softsplat.FunctionSoftsplat(tenInput=raw_rgba, 
                                                  tenFlow=flow_2d, 
                                                  tenMetric=None, 
                                                  strType='average')
     
-    
+
+    #raw_rgba = raw_rgba.cpu()
+    #raw_rgba = None    
 
     # splatting for static nerf
-    pts_rig_e_local = se3_transform_points(pts_ref_e_G.to(R_w2t.device), 
+    pts_mid_e_local = se3_transform_points(pts_ref_e_G.to(R_w2t.device), 
                                            R_w2t.unsqueeze(0).unsqueeze(0), 
                                            t_w2t.unsqueeze(0).unsqueeze(0))
     
-    pts_2d_rig = perspective_projection(pts_rig_e_local, H, W, focal)
+    pts_2d_mid = perspective_projection(pts_mid_e_local, H, W, focal)
 
-    flow_2d_rig = pts_2d_rig - pts_2d_original
+    flow_2d_mid = pts_2d_mid - pts_2d_original
 
-    flow_2d_rig = flow_2d_rig.permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
+    flow_2d_mid = flow_2d_mid.permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
     #ret["raw_dino"] = ret["raw_dino"].cuda()
     #ret["raw_dino_rigid"] = ret["raw_dino_rigid"].cpu()
     
     #for k in ret:
     #    print(k, ret[k].device)
     device = ret["raw_dino_rigid"].device
-    raw_rgba_rig = torch.cat([ret['raw_rgb_rigid'].to(device),  ret['raw_alpha_rigid'].unsqueeze(-1).to(device), ret["raw_dino_rigid"]], dim=-1)
-    raw_rgba_rig = raw_rgba_rig[:, :, j, :].permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
+    #device = "cpu"
+    #raw_rgba = raw_rgba.cpu()
+    #raw_rgba = None
+    #assert False, [ret["raw_rgb_rigid"].shape, ret["raw_alpha_rigid"].shape, ret["raw_dino_rigid"].shape]
+    raw_rgba = torch.cat([ret['raw_rgb_rigid'][:, :, j, :].to(device),  ret['raw_alpha_rigid'][:, :, j].unsqueeze(-1).to(device), ret["raw_dino_rigid"][:, :, j, :]], dim=-1)
+    raw_rgba = raw_rgba.permute(2, 0, 1).unsqueeze(0).contiguous().cuda()
 
-    splat_raw['splat_raw_rgba_rig'] = softsplat.FunctionSoftsplat(tenInput=raw_rgba_rig, 
-                                                 tenFlow=flow_2d_rig, 
+    splat_raw['splat_raw_rgba_rig'] = softsplat.FunctionSoftsplat(tenInput=raw_rgba, 
+                                                 tenFlow=flow_2d_mid, 
                                                  tenMetric=None, 
                                                  strType='average')
     
     #assert False, [k for k in globals()]
     softsplat = pts_ref = pts_ref_e_G = pts_post = pts_post_e_G = pts_mid_e_G = pts_mid_e_local =\
-    pts_2d_mid = xx = yy = pts_2d_original = flow_2d = raw_rgba = pts_rig_e_local = pts_2d_rig = flow_2d_rig = raw_rgba_rig = None
+    pts_2d_mid = xx = yy = pts_2d_original = flow_2d = raw_rgba = None
+    # pts_rig_e_local = pts_2d_rig = flow_2d_rig = raw_rgba_rig = None
     #print("I am here")
     
     #et["raw_dino_rigid"] = ret["raw_dino_rigid"].cuda()
@@ -265,8 +275,8 @@ def render_slowmo_bt(disps, render_poses, bt_poses,
         # final_depth = torch.clamp(final_depth/percentile(final_depth, 98), 0., 1.) 
         # depth8 = to8b(final_depth.permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())
 
-        start_y = (rgb8.shape[1] - 512) // 2
-        rgb8 = rgb8[:, start_y:start_y+ 512, :]
+        start_y = (rgb8.shape[1] - W) // 2
+        rgb8 = rgb8[:, start_y:start_y+ W, :]
         # depth8 = depth8[:, start_y:start_y+ 512, :]
 
         filename = os.path.join(save_img_dir, '{:03d}.jpg'.format(i))
@@ -284,12 +294,13 @@ def render_slowmo_full(disps, render_poses, bt_poses,
     # import scipy.io
 
     H, W, focal = hwf
-
+    
     if render_factor!=0:
         # Render downsampled for speed
         H = H//render_factor
         W = W//render_factor
         focal = focal/render_factor
+    
     #assert False, [H, W, focal]
     t = time.time()
 
@@ -392,7 +403,11 @@ def render_slowmo_full(disps, render_poses, bt_poses,
         #ret1["raw_alpha"] /= ret1["raw_blend_w"]
         #ret1["raw_alpha_rigid"] /= 1. - ret1["raw_blend_w"]
         ret1["raw_dino"] = ret1["raw_dino"].cpu()
-
+        #ret1["raw_dino_rigid"] = ret1["raw_dino_rigid"].cpu()
+        ret1["rays_o"] = ret1["rays_o"].cpu()
+        ret1["rays_d"] = ret1["rays_d"].cpu()
+        
+        #assert False, ret1["raw_dino"].shape
         ret2 = render_sm(img_idx_embed_2, 0, False,
                         num_img, 
                         H, W, focal, 
@@ -400,6 +415,8 @@ def render_slowmo_full(disps, render_poses, bt_poses,
                         c2w=tmp["render_pose"],
                         return_sem=True, 
                         **render_kwargs)
+        ret2["rays_o"] = None
+        ret2["rays_d"] = None
         
         #ret2["raw_dino"] = ret2["raw_dino"].cpu()
         #ret2["raw_alpha"] /= ret2["raw_blend_w"]
@@ -503,6 +520,7 @@ def render_slowmo_full(disps, render_poses, bt_poses,
 
         #alpha_1_final = alpha_2_final = alpha_final = None
         #alpha_final_dy = alpha_final_rig = None
+        
         filename = os.path.join(save_pose_dir, '{:03d}.pt'.format(i))
         torch.save(torch.stack([ret1["rays_o"], ret1["rays_d"]], dim=0), filename)
 
@@ -527,14 +545,15 @@ def render_slowmo_full(disps, render_poses, bt_poses,
 
         blend8 = to8b(tmp["final_blend"].permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())        
 
-        start_y = (rgb8.shape[1] - 512) // 2
-        rgb8 = rgb8[:, start_y:start_y+ 512, :]
-        rgb8_dy = rgb8_dy[:, start_y:start_y+ 512, :]
-        rgb8_rig = rgb8_rig[:, start_y:start_y+ 512, :]
-        depth8 = depth8[:, start_y:start_y+ 512, :]
-        depth8_dy = depth8_dy[:, start_y:start_y+ 512, :]
-        depth8_rig = depth8_rig[:, start_y:start_y+ 512, :]
-        blend8 = blend8[:, start_y:start_y+ 512, :]        
+        #assert False, [H, W, hwf]
+        start_y = (rgb8.shape[1] - W) // 2
+        rgb8 = rgb8[:, start_y:start_y+ W, :]
+        rgb8_dy = rgb8_dy[:, start_y:start_y+ W, :]
+        rgb8_rig = rgb8_rig[:, start_y:start_y+ W, :]
+        depth8 = depth8[:, start_y:start_y+ W, :]
+        depth8_dy = depth8_dy[:, start_y:start_y+ W, :]
+        depth8_rig = depth8_rig[:, start_y:start_y+ W, :]
+        blend8 = blend8[:, start_y:start_y+ W, :]        
 
         filename = os.path.join(save_img_dir, '{:03d}.jpg'.format(i))
         imageio.imwrite(filename, rgb8)
@@ -572,6 +591,337 @@ def render_slowmo_full(disps, render_poses, bt_poses,
          
         
         torch.cuda.empty_cache()
+
+def render_pcd_color(render_poses, bt_poses, 
+                     hwf, chunk, render_kwargs, 
+                     gt_imgs=None, savedir=None, 
+                     render_factor=0, target_idx=10,
+                     alpha_threshold=0.2):
+    # import scipy.io
+
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+
+    for i, cur_time in enumerate(np.linspace(target_idx - 10., target_idx + 10., 200 + 1).tolist()):
+        flow_time = int(np.floor(cur_time))
+        ratio = cur_time - np.floor(cur_time)
+        print('cur_time ', i, cur_time, ratio)
+        t = time.time()
+
+        int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+                                                render_poses[flow_time, :3, :3],
+                                                render_poses[flow_time + 1, :3, 3], 
+                                                render_poses[flow_time + 1, :3, :3], 
+                                                ratio)
+
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        int_poses = np.dot(int_poses, bt_poses[i])
+
+        render_pose = torch.Tensor(int_poses).to(device)
+
+        R_w2t = render_pose[:3, :3].transpose(0, 1)
+        t_w2t = -torch.matmul(R_w2t, render_pose[:3, 3:4])
+
+        num_img = gt_imgs.shape[0]
+        img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed_1 ', cur_time, img_idx_embed_1)
+
+        ret1 = render_sm(img_idx_embed_1, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=render_pose,
+                        **render_kwargs)
+
+        ret2 = render_sm(img_idx_embed_2, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=render_pose, 
+                        **render_kwargs)
+        
+        #T_i = torch.ones((1, H, W))
+        num_sample = ret1['raw_rgb'].shape[2]
+        final_rgb = torch.zeros((3, H, W, num_sample))
+        final_alpha = torch.zeros((1, H, W, num_sample))
+        # final_depth = torch.zeros((1, H, W))
+        z_vals = ret1['z_vals']
+        #assert False, [(t, ret1[t].device) for t in ret1]
+        points = ret1['rays_o'][...,None,:] + ret1['rays_d'][...,None,:] * (z_vals[...,:,None]).to(ret1['rays_d'].device)
+        #assert False, [ret1["rays_o"].shape, ret1["rays_o"].shape, ret1["z_vals"].shape, points.shape]
+
+        for j in range(0, num_sample):
+            splat_alpha_dy_1, splat_rgb_dy_1, \
+            splat_alpha_rig_1, splat_rgb_rig_1 = splat_rgb_img(ret1, ratio, R_w2t, t_w2t, 
+                                                            j, H, W, focal, True)
+            splat_alpha_dy_2, splat_rgb_dy_2, \
+            splat_alpha_rig_2, splat_rgb_rig_2 = splat_rgb_img(ret2, 1. - ratio, R_w2t, t_w2t, 
+                                                            j, H, W, focal, False)
+            #assert False, [splat_alpha_dy_1.shape, splat_rgb_dy_1.shape]
+            #final_rgb += T_i * (splat_alpha_dy_1 * splat_rgb_dy_1 + \
+            #                    splat_alpha_rig_1 * splat_rgb_rig_1 ) * (1.0 - ratio)
+            #final_rgb += T_i * (splat_alpha_dy_2 * splat_rgb_dy_2 + \
+            #                    splat_alpha_rig_2 * splat_rgb_rig_2 ) * ratio
+            final_rgb[..., j] = (splat_alpha_dy_1/(splat_alpha_dy_1 + splat_alpha_rig_1) * splat_rgb_dy_1 + \
+                                splat_alpha_rig_1/(splat_alpha_dy_1 + splat_alpha_rig_1) * splat_rgb_rig_1 ) * (1.0 - ratio) + \
+                                (splat_alpha_dy_2/(splat_alpha_dy_2 + splat_alpha_rig_2) * splat_rgb_dy_2 + \
+                                splat_alpha_rig_2/(splat_alpha_dy_2 + splat_alpha_rig_2) * splat_rgb_rig_2 ) * ratio
+            #assert False, [num_sample, z_vals.shape]
+
+            
+            # splat_alpha = splat_alpha1 * (1. - ratio) + splat_alpha2 * ratio
+            # final_rgb += T_i * (splat_alpha1 * (1. - ratio) * splat_rgb1 +  splat_alpha2 * ratio * splat_rgb2)
+
+            alpha_1_final = (1.0 - (1. - splat_alpha_dy_1) * (1. - splat_alpha_rig_1) ) * (1. - ratio)
+            alpha_2_fianl = (1.0 - (1. - splat_alpha_dy_2) * (1. - splat_alpha_rig_2) ) * ratio
+            #assert False, alpha_1_final.shape
+            final_alpha[..., j] = alpha_1_final + alpha_2_fianl
+            #assert False, [torch.max(final_alpha), torch.min(final_alpha), torch.median(final_alpha)]
+            # final_depth += T_i * (alpha_final) * z_vals[..., j]
+            #T_i = T_i * (1.0 - alpha_final + 1e-10)
+        #assert False, [torch.max(final_rgb), torch.min(final_rgb), points.shape, final_rgb.shape, points.device, final_rgb.device]
+        
+        #filename = os.path.join(savedir, 'slow-mo_%03d.jpg'%(i))
+        #xyz = 
+        #xyz = rays_o.view(-1, 3).cpu().numpy()
+        #final_rgb = 
+        #points = points.permute()
+        points = points[final_alpha[0] > alpha_threshold, :]
+        final_rgb = final_rgb[:, final_alpha[0] > alpha_threshold]
+        #assert False, [points.shape, final_rgb.shape, final_alpha[0].shape]
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points.reshape((-1, 3)).cpu().numpy())
+        pcd.colors = o3d.utility.Vector3dVector(final_rgb.permute(1, 0).reshape((-1, 3)).cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}.ply'.format(i)), pcd)
+        assert False, "Pause"
+        #rgb8 = to8b(final_rgb.permute(1, 2, 0).cpu().numpy())
+
+        # final_depth = torch.clamp(final_depth/percentile(final_depth, 98), 0., 1.) 
+        # depth8 = to8b(final_depth.permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())
+
+        #start_y = (rgb8.shape[1] - 512) // 2
+        #rgb8 = rgb8[:, start_y:start_y+ 512, :]
+        # depth8 = depth8[:, start_y:start_y+ 512, :]
+
+        #filename = os.path.join(save_img_dir, '{:03d}.jpg'.format(i))
+        #imageio.imwrite(filename, rgb8)
+
+        # filename = os.path.join(save_depth_dir, '{:03d}.jpg'.format(i))
+        # imageio.imwrite(filename, depth8)
+def render_pcd_cluster(algorithm, centroids, salient_labels, render_poses, bt_poses, 
+                     hwf, chunk, render_kwargs, 
+                     gt_imgs=None, savedir=None, 
+                     render_factor=0, target_idx=10,
+                     alpha_threshold=0.2):
+    # import scipy.io
+
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None
+    }
+    
+    splat_raw_1 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+    splat_raw_2 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+
+    for i, cur_time in enumerate(np.linspace(target_idx - 10., target_idx + 10., 200 + 1).tolist()):
+        flow_time = int(np.floor(cur_time))
+        ratio = cur_time - np.floor(cur_time)
+        print('cur_time ', i, cur_time, ratio)
+        t = time.time()
+
+        int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+                                                render_poses[flow_time, :3, :3],
+                                                render_poses[flow_time + 1, :3, 3], 
+                                                render_poses[flow_time + 1, :3, :3], 
+                                                ratio)
+
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        num_img = gt_imgs.shape[0]
+        img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed_1 ', cur_time, img_idx_embed_1)
+
+        ret1 = render_sm(img_idx_embed_1, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        ret1["raw_dino"] = ret1["raw_dino"].cpu()
+        ret2 = render_sm(img_idx_embed_2, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True, 
+                        **render_kwargs)
+        
+        #T_i = torch.ones((1, H, W))
+        num_sample = ret1['raw_rgb'].shape[2]
+        
+        tmp["final_dino"] = torch.zeros((ret1["raw_dino"].shape[-1]+3, H, W))
+        
+        #tmp["final_blend"] = torch.zeros((1, H, W))
+        
+        tmp["z_vals"] = ret1['z_vals']
+        #final_rgb = torch.zeros((3, H, W, num_sample))
+        tmp["final_alpha"] = torch.zeros((1, H, W, num_sample))
+        # final_depth = torch.zeros((1, H, W))
+        #z_vals = ret1['z_vals']
+        #assert False, [(t, ret1[t].device) for t in ret1]
+        tmp["points"] = ret1['rays_o'][...,None,:].cpu() + ret1['rays_d'][...,None,:].cpu() * (tmp["z_vals"][...,:,None])
+        #tmp["points"] = tmp["points"].cpu()
+        #assert False, [ret1["rays_o"].shape, ret1["rays_o"].shape, ret1["z_vals"].shape, points.shape]
+        tmp["final_labels"] = -torch.ones((H*W, num_sample)).long().cpu()
+
+        for j in tqdm(range(0, num_sample)):
+            splat_full_img(ret1, ratio, tmp["R_w2t"], tmp["t_w2t"], j, H, W, focal, True, splat_raw=splat_raw_1)
+            splat_full_img(ret2, 1. - ratio, tmp["R_w2t"], tmp["t_w2t"], j, H, W, focal, False, splat_raw=splat_raw_2)
+            #assert False, [splat_alpha_dy_1.shape, splat_rgb_dy_1.shape]
+            #final_rgb += T_i * (splat_alpha_dy_1 * splat_rgb_dy_1 + \
+            #                    splat_alpha_rig_1 * splat_rgb_rig_1 ) * (1.0 - ratio)
+            #final_rgb += T_i * (splat_alpha_dy_2 * splat_rgb_dy_2 + \
+            #                    splat_alpha_rig_2 * splat_rgb_rig_2 ) * ratio
+            #assert False, [torch.any(torch.isnan(splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]/(splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]))),
+            #    torch.any(torch.isnan(splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]/(splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]))),
+            #    torch.any(torch.isnan(splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]/(splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :]))),
+            #    torch.any(torch.isnan(splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :]/(splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :])))]            
+            tmp["final_dino"][:-3, ...] = (splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]/(1e-12+splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]) * splat_raw_1["splat_raw_rgba_dy"][0, 4:, :, :] + \
+                                splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]/(1e-12+splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]) * splat_raw_1["splat_raw_rgba_rig"][0, 4:, :, :] ) * (1.0 - ratio)
+            tmp["final_dino"][:-3, ...] += (splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]/(1e-12+splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :]) * splat_raw_2["splat_raw_rgba_dy"][0, 4:, :, :] + \
+                                splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :]/(1e-12+splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]+splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :]) * splat_raw_2["splat_raw_rgba_rig"][0, 4:, :, :] ) * ratio
+            
+            #tmp["final_dino"][:-3, ...][torch.isnan(tmp["final_dino"][:-3, ...])] = 0   
+            #assert False, torch.any(torch.isnan(tmp["final_dino"]))
+            old_shape = tmp["final_dino"][:-3, ...].shape
+            # flatten and filter out samples that do not have dino feature
+            empty_region = torch.all(tmp["final_dino"][:-3, ...] == 0, dim=0)
+            #assert False, empty_region.shape
+            #assert False, [old_shape, torch.sum(tmp["final_dino"][:-3, ...]==0), torch.sum(empty_region)]
+            
+            
+            # equivalent to faiss.normalize_L2
+            #norm_1 = tmp["final_dino"][:-3, ...].view(old_shape[0], -1).permute(1, 0).contiguous().cpu().numpy()
+            #assert False, [np.max(norm_1), np.min(norm_1)]
+            #faiss.normalize_L2(norm_1)
+            norm = tmp["final_dino"][:-3, ...][:, ~empty_region]
+            #assert False, norm.shape
+            norm = torch.nn.functional.normalize(norm, dim=0).view(old_shape[0], -1).permute(1, 0)
+            #assert False, [np.max(norm_1), np.min(norm_1), norm_1.shape, np.sum(norm_1, axis=-1), torch.sum(norm_2, dim=-1)]
+            #norm_2 = torch.nn.functional.normalize(torch.cat([norm, norm], dim=-1), dim=0).view(old_shape[0], -1).permute(1, 0)
+            #assert False, [torch.sum(norm_1, dim=-1), torch.sum(norm_2, dim=-1)]
+            #assert False, norm
+            #assert False, [tmp['points'].shape, empty_region.shape]
+            pts = tmp["points"][..., j, :]
+            pts = pts[~empty_region]
+            pts = torch.nn.functional.normalize(pts, dim=-1)
+            normalized_all_descriptors = torch.cat([norm.cpu(), pts], dim=-1).contiguous().numpy()
+            
+            _, labels = algorithm.index.search(normalized_all_descriptors.astype(np.float32), 1)
+            labels[~np.isin(labels, salient_labels)] = -1
+            #assert False, [norm.shape, pts.shape, labels.shape]
+            tmp["final_labels"][~empty_region.view(-1), j] = torch.from_numpy(labels[:, 0])
+            #assert False, "store color at this step"
+            #assert False, [num_sample, z_vals.shape]
+
+            
+            # splat_alpha = splat_alpha1 * (1. - ratio) + splat_alpha2 * ratio
+            # final_rgb += T_i * (splat_alpha1 * (1. - ratio) * splat_rgb1 +  splat_alpha2 * ratio * splat_rgb2)
+
+            #alpha_1_final = (1.0 - (1. - splat_alpha_dy_1) * (1. - splat_alpha_rig_1) ) * (1. - ratio)
+            #alpha_2_fianl = (1.0 - (1. - splat_alpha_dy_2) * (1. - splat_alpha_rig_2) ) * ratio
+            #assert False, alpha_1_final.shape
+            tmp["final_alpha"][..., j] =  (1.0 - (1. - splat_raw_1["splat_raw_rgba_dy"][0, 3:4, :, :]) * (1. - splat_raw_1["splat_raw_rgba_rig"][0, 3:4, :, :]) ) * (1. - ratio)\
+                        + (1.0 - (1. - splat_raw_2["splat_raw_rgba_dy"][0, 3:4, :, :]) * (1. - splat_raw_2["splat_raw_rgba_rig"][0, 3:4, :, :]) ) * ratio
+            #assert False, [torch.max(final_alpha), torch.min(final_alpha), torch.median(final_alpha)]
+            # final_depth += T_i * (alpha_final) * z_vals[..., j]
+            #T_i = T_i * (1.0 - alpha_final + 1e-10)
+            #break
+        #assert False
+        #assert False, tmp["final_labels"].shape, tmp["final"]
+        #assert False, [torch.max(final_rgb), torch.min(final_rgb), points.shape, final_rgb.shape, points.device, final_rgb.device]
+        
+        #filename = os.path.join(savedir, 'slow-mo_%03d.jpg'%(i))
+        #xyz = 
+        #xyz = rays_o.view(-1, 3).cpu().numpy()
+        #final_rgb = 
+        #points = points.permute()
+        tmp["points"] = tmp["points"][tmp["final_alpha"][0] > alpha_threshold, :]
+        tmp["final_labels"] = d3_41_colors_rgb_tensor[tmp["final_labels"].view(H, W, -1)[tmp["final_alpha"][0] > alpha_threshold]]/255.
+        #assert False, (tmp["points"].shape, tmp["final_labels"].shape, torch.max(tmp["final_labels"]))
+        #tmp["final_dino"] = torch.cat()
+        #assert False, [points.shape, final_rgb.shape, final_alpha[0].shape]
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(tmp["points"].cpu().numpy())
+        pcd.colors = o3d.utility.Vector3dVector(tmp["final_labels"].cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}.ply'.format(i)), pcd)
+        assert False, "Pause"
+        #rgb8 = to8b(final_rgb.permute(1, 2, 0).cpu().numpy())
+
+        # final_depth = torch.clamp(final_depth/percentile(final_depth, 98), 0., 1.) 
+        # depth8 = to8b(final_depth.permute(1, 2, 0).repeat(1, 1, 3).cpu().numpy())
+
+        #start_y = (rgb8.shape[1] - 512) // 2
+        #rgb8 = rgb8[:, start_y:start_y+ 512, :]
+        # depth8 = depth8[:, start_y:start_y+ 512, :]
+
+        #filename = os.path.join(save_img_dir, '{:03d}.jpg'.format(i))
+        #imageio.imwrite(filename, rgb8)
+
+        # filename = os.path.join(save_depth_dir, '{:03d}.jpg'.format(i))
+        # imageio.imwrite(filename, depth8)
+
 
 def render_lockcam_slowmo(ref_c2w, num_img, 
                         hwf, chunk, render_kwargs, 
@@ -655,8 +1005,8 @@ def render_lockcam_slowmo(ref_c2w, num_img,
         filename = os.path.join(savedir, '%03d.jpg'%(i))
         rgb8 = to8b(final_rgb.permute(1, 2, 0).cpu().numpy())
 
-        start_y = (rgb8.shape[1] - 512) // 2
-        rgb8 = rgb8[:, start_y:start_y+ 512, :]
+        start_y = (rgb8.shape[1] - W) // 2
+        rgb8 = rgb8[:, start_y:start_y+ W, :]
 
         imageio.imwrite(filename, rgb8)
 
@@ -747,6 +1097,8 @@ def batchify_rays_sm(img_idx, chain_bwd, chain_5frames,
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
+            if not k.startswith('raw_dino'):
+                ret[k] = ret[k].cpu()
             all_ret[k].append(ret[k])
 
     #all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret if None not in all_ret[k]}    
@@ -1126,8 +1478,8 @@ def render_bullet_time(render_poses, img_idx_embed, num_img,
             rgb8 = to8b(rgb)
             depth8 = to8b(depth.unsqueeze(-1).repeat(1, 1, 3).cpu().numpy())
 
-            start_y = (rgb8.shape[1] - 512) // 2
-            rgb8 = rgb8[:, start_y:start_y+ 512, :]
+            start_y = (rgb8.shape[1] - W) // 2
+            rgb8 = rgb8[:, start_y:start_y+ W, :]
 
             # depth8 = depth8[:, start_y:start_y+ 512, :]
 

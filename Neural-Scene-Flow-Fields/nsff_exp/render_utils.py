@@ -2016,8 +2016,8 @@ def render_rays(img_idx,
             ret['rgb_map_pp_dy'] = rgb_map_postpost_dy
 
 
-    for k in ret:
-        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
-            print(f"! [Numerical Error] {k} contains nan or inf.")
+    #for k in ret:
+    #    if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
+    #        print(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret

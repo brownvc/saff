@@ -76,14 +76,14 @@ def get_embedder(multires, i=0, input_dims=3):
 
 # Model
 class NeRF(nn.Module):
-    def __init__(self, use_tanh, shallow_dino, dino_ch, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=True):
+    def __init__(self, use_tanh, shallow_dino, dino_ch, use_sal, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=True):
         """ 
         """
         super(NeRF, self).__init__()
         self.use_tanh = use_tanh
         self.shallow_dino = shallow_dino
         self.dino_ch = dino_ch
-        
+        self.use_sal = use_sal 
         self.D = D
         self.W = W
         self.input_ch = input_ch
@@ -115,8 +115,10 @@ class NeRF(nn.Module):
                         nn.Linear(W, W),
                         nn.Linear(W, dino_ch)
                     ])
+            if self.use_sal:
+                self.sal_linear = nn.Linear(W, 1)
         else:
-            self.output_linear = nn.Linear(W, output_ch+dino_ch)
+            self.output_linear = nn.Linear(W, output_ch+dino_ch+int(use_sal))
         
         self.sf_linear = nn.Linear(W, 6)
         self.prob_linear = nn.Linear(W, 2)
@@ -151,6 +153,9 @@ class NeRF(nn.Module):
                         dino = F.relu(dino)
                 if self.use_tanh:
                     dino = F.tanh(dino)
+            if self.use_sal:
+                sal = self.sal_linear(h)
+                sal = F.sigmoid(sal)
             feature = self.feature_linear(h)
             h = torch.cat([feature, input_views], -1)
         
@@ -163,9 +168,13 @@ class NeRF(nn.Module):
             # blend_w = nn.functional.sigmoid(self.blend_linear(h))
 
             if self.dino_ch > 0:
-                outputs = torch.cat([rgb, alpha, dino], -1)
+                if self.use_sal:
+                    outputs = torch.cat([rgb, alpha, dino, sal], -1)
+                else:
+                    outputs = torch.cat([rgb, alpha, dino], -1)  
             else:
                 outputs = torch.cat([rgb, alpha], -1)
+
         else:
             outputs = self.output_linear(h)
 
@@ -175,14 +184,14 @@ class NeRF(nn.Module):
 
 # Model
 class Rigid_NeRF(nn.Module):
-    def __init__(self, use_tanh, shallow_dino, dino_ch, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=True):
+    def __init__(self, use_tanh, shallow_dino, dino_ch, use_sal, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=True):
         """ 
         """
         super(Rigid_NeRF, self).__init__()
         self.use_tanh = use_tanh
         self.shallow_dino = shallow_dino
         self.dino_ch = dino_ch
-        
+        self.use_sal = use_sal
         self.D = D
         self.W = W
         self.input_ch = input_ch
@@ -209,8 +218,10 @@ class Rigid_NeRF(nn.Module):
                         nn.Linear(W, W),
                         nn.Linear(W, dino_ch)
                     ])
+            if self.use_sal:
+                self.sal_linear = nn.Linear(W, 1)
         else:
-            self.output_linear = nn.Linear(W, output_ch+dino_ch)
+            self.output_linear = nn.Linear(W, output_ch+dino_ch+int(self.sal))
     
         self.w_linear = nn.Linear(W, 1)
         # h = F.relu(h)
@@ -245,6 +256,9 @@ class Rigid_NeRF(nn.Module):
                         dino = F.relu(dino)
                 if self.use_tanh:
                     dino = F.tanh(dino)
+            if self.use_sal:
+                sal = self.sal_linear(h)
+                sal = F.sigmoid(sal)
             h = torch.cat([feature, input_views], -1)
         
             for i, l in enumerate(self.views_linears):
@@ -253,7 +267,10 @@ class Rigid_NeRF(nn.Module):
 
             rgb = self.rgb_linear(h)
             if self.dino_ch > 0:
-                outputs = torch.cat([rgb, alpha, dino], -1)
+                if self.use_sal:
+                    outputs = torch.cat([rgb, alpha, dino, sal], -1)
+                else:
+                    outputs = torch.cat([rgb, alpha, dino], -1)                
             else:
                 outputs = torch.cat([rgb, alpha], -1)
         else:

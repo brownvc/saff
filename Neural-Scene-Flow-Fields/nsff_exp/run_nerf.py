@@ -187,6 +187,8 @@ def config_parser():
     parser.add_argument('--bin', default='False', type=str2bool, help="create a binned descriptor if True.")
     parser.add_argument('--load_dino_size', default=128, type=int, help='load size of the input image.')
     parser.add_argument('--dino_coe', default=0.0, type=float, help='weight of the feature loss.')
+    parser.add_argument('--sal_coe', default=0.0, type=float, help='weight of the saliency loss.')
+    
     parser.add_argument("--shallow_dino", action='store_true', 
                         help='use one layer as dino head')
     parser.add_argument("--prep_dino", action='store_true', 
@@ -221,9 +223,12 @@ def train():
         
         if args.dino_coe > 0:
             extractor = ViTExtractor(args.model_type, args.stride, device=device)
+            if args.sal_coe > 0:
+                saliency_extractor = extractor
             # have to do this in batch otherwise blows the gpu
             start = 0
             feats = None
+            sals = None
             num_patches_list = []
             while start < images.shape[0]:
                 #print(start)
@@ -239,16 +244,29 @@ def train():
                 batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
                 #print(batch.shape)
                 with torch.no_grad():
+                    
                     feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
                     feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    if args.sal_coe > 0:
+                        #assert False, batch.shape
+                        sal_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
+                        sal_raw = sal_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                        #assert False, [sal_raw.shape, feat_raw.shape]
                     num_patches_list += [extractor.num_patches]*feat_raw.shape[0]
                 #feat_raw = F.interpolate(feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2), (height, width), mode="bilinear")
                 if feats is None:
                     feats = feat_raw.permute(0, 2, 3, 1).detach().cpu()
+                    if args.sal_coe > 0:
+                        sals = sal_raw.permute(0, 2, 3, 1).detach().cpu()
                 else:         
                     feats = torch.cat((feats, feat_raw.permute(0, 2, 3, 1).detach().cpu()), dim=0)
+                    if args.sal_coe > 0:
+                        sals = torch.cat((sals, sal_raw.permute(0, 2, 3, 1).detach().cpu()), dim = 0)
                 batch = batch.cpu()
                 feat_raw = feat_raw.detach().cpu()
+                if args.sal_coe > 0:
+                    sal_raw = sal_raw.detach().cpu()
+                #assert False, [feats.shape, sals.shape]
                 start += args.dino_batch
             if args.prep_dino:
                 #feat_norm = torch.linalg.norm(feats, dim=-1, keepdim=True)
@@ -330,6 +348,7 @@ def train():
 
 
     if args.render_bt:
+        assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER VIEW INTERPOLATION')      
         render_poses = torch.Tensor(render_poses).to(device)
         print('target_idx ', target_idx)
@@ -350,6 +369,7 @@ def train():
         return
 
     if args.render_lockcam_slowmo:
+        assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER TIME INTERPOLATION')
         num_img = float(poses.shape[0])
         ref_c2w = torch.Tensor(ref_c2w).to(device)
@@ -367,6 +387,7 @@ def train():
             return 
 
     if args.render_slowmo_bt:
+        assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER SLOW MOTION') 
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
@@ -390,6 +411,7 @@ def train():
 
         return
     if args.render_slowmo_full:
+        assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER SLOW MOTION') 
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
@@ -413,6 +435,7 @@ def train():
 
         return
     if args.render_pcd_color:
+        assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER pcd color')
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
@@ -434,6 +457,7 @@ def train():
         return
     
     if args.render_pcd_cluster:
+        assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER pcd cluster')
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
@@ -513,6 +537,8 @@ def train():
         mask_gt = masks[img_i].cuda()
         if args.dino_coe > 0:
             feat_gt = feats[img_i].cuda()
+            if args.sal_coe > 0:
+                sal_gt = sals[img_i].cuda()
 
         if img_i == 0:
             flow_fwd, fwd_mask = read_optical_flow(args.datadir, img_i, 
@@ -620,6 +646,10 @@ def train():
                 
                 target_feat = feat_gt[(select_coords[:, 0] / float(images.shape[1]) * feats.shape[1]).long(),
                                 (select_coords[:, 1] / float(images.shape[2]) * feats.shape[2]).long()]
+                if args.sal_coe > 0:
+                    target_sal = sal_gt[(select_coords[:, 0] / float(images.shape[1]) * sals.shape[1]).long(),
+                                (select_coords[:, 1] / float(images.shape[2]) * sals.shape[2]).long()]
+                    
             target_depth = depth_gt[select_coords[:, 0], 
                                 select_coords[:, 1]]
             target_mask = mask_gt[select_coords[:, 0], 
@@ -690,6 +720,14 @@ def train():
                 render_loss_dino += compute_mse(ret['dino_map_prev_dy'],
                                                 target_feat,
                                                 weight_map_prev.unsqueeze(-1))
+                if args.sal_coe > 0:
+                    render_loss_sal = img2mse(ret["sal_map_ref_dy"], target_sal)
+                    render_loss_sal += compute_mse(ret["sal_map_post_dy"],
+                                                target_sal,
+                                                weight_map_post.unsqueeze(-1))
+                    render_loss_sal += compute_mse(ret["sal_map_prev_dy"],
+                                                target_sal,
+                                                weight_map_prev.unsqueeze(-1))
         else:
             print('only compute dynamic render loss in masked region')
             weights_map_dd = ret['weights_map_dd'].unsqueeze(-1).detach()
@@ -709,12 +747,22 @@ def train():
                 render_loss_dino = compute_mse(ret["dino_map_ref_dy"],
                                                 target_feat,
                                                 weights_map_dd)
-                render_loss_dino = compute_mse(ret["dino_map_post_dy"],
+                render_loss_dino += compute_mse(ret["dino_map_post_dy"],
                                                 target_feat,
                                                 weight_map_post.unsqueeze(-1) * weights_map_dd)
-                render_loss_dino = compute_mse(ret["dino_map_prev_dy"],
+                render_loss_dino += compute_mse(ret["dino_map_prev_dy"],
                                                 target_feat,
                                                 weight_map_prev.unsqueeze(-1) * weights_map_dd)    
+                if args.sal_coe > 0:
+                    render_loss_sal = compute_mse(ret["sal_map_ref_dy"],
+                                                target_sal,
+                                                weights_map_dd)
+                    render_loss_sal += compute_mse(ret["sal_map_post_dy"],
+                                                target_sal,
+                                                weight_map_post.unsqueeze(-1) * weights_map_dd)
+                    render_loss_sal += compute_mse(ret["sal_map_prev_dy"],
+                                                target_sal,
+                                                weight_map_prev.unsqueeze(-1) * weights_map_dd)
 
         # union rendering loss
         render_loss += img2mse(ret['rgb_map_ref'][:N_rand, ...], 
@@ -722,6 +770,9 @@ def train():
         if args.dino_coe > 0:
             render_loss_dino += img2mse(ret["dino_map_ref"][:N_rand, ...],
                                     target_feat[:N_rand, ...])
+            if args.sal_coe > 0:
+                render_loss_sal += img2mse(ret["sal_map_ref"][:N_rand, ...],
+                                    target_sal[:N_rand, ...])
 
         sf_cycle_loss = args.w_cycle * compute_mae(ret['raw_sf_ref2post'], 
                                                    -ret['raw_sf_post2ref'], 
@@ -814,16 +865,23 @@ def train():
                 render_loss_dino += compute_mse(ret["dino_map_pp_dy"],
                                             target_feat,
                                             weights_map_dd)
-        
+                if args.sal_coe > 0:
+                    render_loss_sal += compute_mse(ret["sal_map_pp_dy"],
+                                            target_sal,
+                                            weights_map_dd) 
         if args.dino_coe > 0:
             render_loss_dino = args.dino_coe * render_loss_dino
+            if args.sal_coe > 0:
+                render_loss_sal = args.sal_coe * render_loss_sal
         loss = sf_reg_loss + sf_cycle_loss + \
-               render_loss + (render_loss_dino if args.dino_coe > 0 else 0) + flow_loss + \
+               render_loss + (render_loss_dino if args.dino_coe > 0 else 0) + (render_loss_sal if args.sal_coe > 0 else 0) + flow_loss + \
                sf_sm_loss + prob_reg_loss + \
                depth_loss + entropy_loss 
 
         if args.dino_coe > 0:
             print('render_loss_dino ', render_loss_dino.item())
+            if args.sal_coe > 0:
+                print('render_loss_sal ', render_loss_sal.item())
         print('render_loss ', render_loss.item(), 
               ' bidirection_loss ', sf_cycle_loss.item(), 
               ' sf_reg_loss ', sf_reg_loss.item())
@@ -877,6 +935,8 @@ def train():
             writer.add_scalar("train/render_loss", render_loss.item(), i)
             if args.dino_coe > 0:
                 writer.add_scalar("train/render_loss_dino", render_loss_dino.item(), i)
+                if args.sal_coe > 0:
+                    writer.add_scalar("train/render_loss_sal", render_loss_sal.item(), i)
             writer.add_scalar("train/depth_loss", depth_loss.item(), i)
             writer.add_scalar("train/flow_loss", flow_loss.item(), i)
             writer.add_scalar("train/prob_reg_loss", prob_reg_loss.item(), i)

@@ -1197,6 +1197,7 @@ def render_rays_sm(img_idx,
       z_std: [num_rays]. Standard deviation of distances along ray for each
         sample.
     """
+    assert False, "not debugged for saliency!"
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
@@ -1502,7 +1503,7 @@ def create_nerf(dino_ch, args):
 
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
-    model = NeRF(use_tanh=args.use_tanh, shallow_dino=args.shallow_dino, dino_ch=dino_ch, D=args.netdepth, W=args.netwidth,
+    model = NeRF(use_tanh=args.use_tanh, shallow_dino=args.shallow_dino, dino_ch=dino_ch, use_sal=args.sal_coe > 0, D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
 
@@ -1515,7 +1516,7 @@ def create_nerf(dino_ch, args):
     grad_vars = list(model.parameters())
 
     embed_fn_rigid, input_rigid_ch = get_embedder(args.multires, args.i_embed, 3)
-    model_rigid = Rigid_NeRF(use_tanh=args.use_tanh, shallow_dino=args.shallow_dino, dino_ch=dino_ch, D=args.netdepth, W=args.netwidth,
+    model_rigid = Rigid_NeRF(use_tanh=args.use_tanh, shallow_dino=args.shallow_dino, dino_ch=dino_ch, use_sal=args.sal_coe > 0, D=args.netdepth, W=args.netwidth,
                              input_ch=input_rigid_ch, output_ch=output_ch, skips=skips,
                              input_ch_views=input_ch_views, 
                              use_viewdirs=args.use_viewdirs).to(device)
@@ -1593,7 +1594,8 @@ def create_nerf(dino_ch, args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
 
-def raw2outputs_blending(raw_dino_dy,
+def raw2outputs_blending(raw_sal_dy, raw_dino_dy,
+                        raw_sal_rigid, 
                         raw_dino_rigid,
                         raw_dy, 
                          raw_rigid,
@@ -1629,11 +1631,15 @@ def raw2outputs_blending(raw_dino_dy,
     # union map 
     rgb_map = torch.sum(weights_dy[..., None] * rgb_dy + \
                         weights_rig[..., None] * rgb_rigid, -2) 
+    dino_map = None
+    sal_map = None
     if raw_dino_dy is not None:
         dino_map = torch.sum(weights_dy[..., None] * raw_dino_dy + \
                         weights_rig[..., None] * raw_dino_rigid, -2) 
-    else:
-        dino_map = None
+        if raw_sal_dy is not None:
+            sal_map = torch.sum(weights_dy[..., None] * raw_sal_dy + \
+                        weights_rig[..., None] * raw_sal_rigid, -2)
+        
     weights_mix = weights_dy + weights_rig
     depth_map = torch.sum(weights_mix * z_vals, -1)
 
@@ -1643,16 +1649,18 @@ def raw2outputs_blending(raw_dino_dy,
                                                                 1.-alpha_fg + 1e-10], -1), -1)[:, :-1]
     depth_map_fg = torch.sum(weights_fg * z_vals, -1)
     rgb_map_fg = torch.sum(weights_fg[..., None] * rgb_dy, -2) 
+    dino_map_fg = None
+    sal_map_fg = None
     if raw_dino_dy is not None:
         dino_map_fg = torch.sum(weights_fg[..., None] * raw_dino_dy, -2)
-    else:
-        dino_map_fg = None
-    return dino_map, rgb_map, depth_map, \
-           dino_map_fg, rgb_map_fg, depth_map_fg, weights_fg, \
+        if raw_sal_dy is not None:
+            sal_map_fg = torch.sum(weights_fg[..., None] * raw_sal_dy, -2)
+    return sal_map, dino_map, rgb_map, depth_map, \
+           sal_map_fg, dino_map_fg, rgb_map_fg, depth_map_fg, weights_fg, \
            weights_dy
 
 
-def raw2outputs_warp(raw_dino, raw_p, 
+def raw2outputs_warp(raw_sal, raw_dino, raw_p, 
                      z_vals, rays_d, 
                      raw_noise_std=0):
 
@@ -1674,16 +1682,18 @@ def raw2outputs_warp(raw_dino, raw_p,
 
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+    dino_map = None
+    sal_map = None
     if raw_dino is not None:
         dino_map = torch.sum(weights[..., None] * raw_dino, -2)
-    else:
-        dino_map = None
+        if raw_sal is not None:
+            sal_map = torch.sum(weights[..., None] * raw_sal, -2)
     depth_map = torch.sum(weights * z_vals, -1)
 
-    return dino_map, rgb_map, depth_map, weights#, alpha #alpha#, 1. - probs
+    return sal_map, dino_map, rgb_map, depth_map, weights#, alpha #alpha#, 1. - probs
 
 
-def raw2outputs(raw_dino, raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(raw_sal, raw_dino, raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -1717,12 +1727,15 @@ def raw2outputs(raw_dino, raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False
     depth_map = torch.sum(weights * z_vals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
 
-    if raw_dino is None:
-        dino_map = None
-    else:
+    dino_map = None
+    sal_map = None
+    if raw_dino is not None:
         dino_map = torch.sum(weights[..., None] * raw_dino, -2) 
+        if raw_sal is not None:
+            sal_map = torch.sum(weights[..., None] * raw_sal, -2)
+            #assert False, [dino_map.shape, sal_map.shape]
 
-    return dino_map, rgb_map, weights, depth_map
+    return sal_map, dino_map, rgb_map, weights, depth_map
 
 def get_rigid_outputs(pts, viewdirs, 
                       network_query_fn, 
@@ -1734,17 +1747,21 @@ def get_rigid_outputs(pts, viewdirs,
     # with torch.no_grad():        
     raw_rigid = network_query_fn(pts[..., :3], viewdirs, network_rigid)
     raw_rgba_rigid = raw_rigid[..., :4]
+    raw_dino_rigid = None
+    raw_sal_rigid = None
     if network_rigid.module.dino_ch > 0:
         raw_dino_rigid = raw_rigid[..., 4:4+network_rigid.module.dino_ch]
-    else:
-        raw_dino_rigid = None
-    raw_blend_w = raw_rigid[..., 4+network_rigid.module.dino_ch:]
+        if network_rigid.module.use_sal:
+            raw_sal_rigid = raw_rigid[..., 4+network_rigid.module.dino_ch:5+network_rigid.module.dino_ch]
     
-    dino_map_rig, rgb_map_rig, weights_rig, depth_map_rig = raw2outputs(raw_dino_rigid, raw_rgba_rigid, z_vals, rays_d, 
+        
+    raw_blend_w = raw_rigid[..., 4+int(network_rigid.module.use_sal)+network_rigid.module.dino_ch:]
+    
+    sal_map_rig, dino_map_rig, rgb_map_rig, weights_rig, depth_map_rig = raw2outputs(raw_sal_rigid, raw_dino_rigid, raw_rgba_rigid, z_vals, rays_d, 
                                                           raw_noise_std, 
                                                           white_bkgd=False)
 
-    return dino_map_rig, rgb_map_rig, depth_map_rig, raw_dino_rigid, raw_rgba_rigid, raw_blend_w[..., 0]
+    return sal_map_rig, dino_map_rig, rgb_map_rig, depth_map_rig, raw_sal_rigid, raw_dino_rigid, raw_rgba_rigid, raw_blend_w[..., 0]
 
 
 def compute_2d_prob(weights_p_mix, 
@@ -1833,7 +1850,7 @@ def render_rays(img_idx,
     pts_ref = torch.cat([pts, img_idx_rep], -1)
 
     # query point at time t
-    dino_map_rig, rgb_map_rig, depth_map_rig, raw_dino_rigid, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
+    sal_map_rig, dino_map_rig, rgb_map_rig, depth_map_rig, raw_sal_rigid, raw_dino_rigid, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
                                                                                rigid_network_query_fn, 
                                                                                network_rigid, 
                                                                                z_vals, rays_d, 
@@ -1841,19 +1858,25 @@ def render_rays(img_idx,
 
     raw_ref = network_query_fn(pts_ref, viewdirs, network_fn)
     raw_rgba_ref = raw_ref[:, :, :4]
+    sal_ch = 0
+    dino_ch = 0
+    raw_dino_ref = None
+    raw_sal_ref = None
     if dino_map_rig is not None:
         dino_ch = dino_map_rig.shape[-1]
         raw_dino_ref = raw_ref[:, :, 4:4+dino_ch]
-    else:
-        dino_ch = 0
-        raw_dino_ref = None
-    raw_sf_ref2prev = raw_ref[:, :, 4+dino_ch:7+dino_ch]
-    raw_sf_ref2post = raw_ref[:, :, 7+dino_ch:10+dino_ch]
+        if sal_map_rig is not None:
+            raw_sal_ref = raw_ref[:, :, 4+dino_ch: 5+dino_ch]
+            sal_ch = sal_map_rig.shape[-1]
+            #assert False, sal_ch
+        
+    raw_sf_ref2prev = raw_ref[:, :, 4+dino_ch+sal_ch:7+dino_ch+sal_ch]
+    raw_sf_ref2post = raw_ref[:, :, 7+dino_ch+sal_ch:10+dino_ch+sal_ch]
     # raw_blend_w_ref = raw_ref[:, :, 12]
 
-    dino_map_ref, rgb_map_ref, depth_map_ref, \
-    dino_map_ref_dy, rgb_map_ref_dy, depth_map_ref_dy, weights_ref_dy, \
-    weights_ref_dd = raw2outputs_blending(raw_dino_ref, raw_dino_rigid,
+    sal_map_ref, dino_map_ref, rgb_map_ref, depth_map_ref, \
+    sal_map_ref_dy, dino_map_ref_dy, rgb_map_ref_dy, depth_map_ref_dy, weights_ref_dy, \
+    weights_ref_dd = raw2outputs_blending(raw_sal_ref, raw_dino_ref, raw_sal_rigid, raw_dino_rigid,
                                           raw_rgba_ref, raw_rgba_rigid,
                                           raw_blend_w,
                                           z_vals, rays_d, 
@@ -1861,8 +1884,9 @@ def render_rays(img_idx,
 
     weights_map_dd = torch.sum(weights_ref_dd, -1).detach()
 
-    ret = {'dino_map_ref': dino_map_ref, 'rgb_map_ref': rgb_map_ref, 'depth_map_ref' : depth_map_ref,  
-            'dino_map_rig': dino_map_rig, 'rgb_map_rig':rgb_map_rig, 'depth_map_rig':depth_map_rig, 
+    ret = {'sal_map_ref': sal_map_ref, 'dino_map_ref': dino_map_ref, 'rgb_map_ref': rgb_map_ref, 'depth_map_ref' : depth_map_ref,  
+            'sal_map_rig': sal_map_rig, 'dino_map_rig': dino_map_rig, 'rgb_map_rig':rgb_map_rig, 'depth_map_rig':depth_map_rig, 
+            'sal_map_ref_dy': sal_map_ref_dy,
             'dino_map_ref_dy': dino_map_ref_dy,
             'rgb_map_ref_dy':rgb_map_ref_dy, 
             'depth_map_ref_dy':depth_map_ref_dy, 
@@ -1886,18 +1910,20 @@ def render_rays(img_idx,
     # render points at t - 1
     raw_prev = network_query_fn(pts_prev, viewdirs, network_fn)
     raw_rgba_prev = raw_prev[:, :, :4]
+    raw_dino_prev = None
+    raw_sal_prev = None
     if dino_ch > 0:
         raw_dino_prev = raw_prev[:, :, 4:4+dino_ch]
-    else:
-        raw_dino_prev = None
-    raw_sf_prev2prevprev = raw_prev[:, :, 4+dino_ch:7+dino_ch]
-    raw_sf_prev2ref = raw_prev[:, :, 7+dino_ch:10+dino_ch]
+        if sal_ch > 0:
+            raw_sal_prev = raw_prev[:, :, 4+dino_ch:5+dino_ch]
+    raw_sf_prev2prevprev = raw_prev[:, :, 4+dino_ch+sal_ch:7+dino_ch+sal_ch]
+    raw_sf_prev2ref = raw_prev[:, :, 7+dino_ch+sal_ch:10+dino_ch+sal_ch]
 
     # render from t - 1
-    dino_map_prev_dy, rgb_map_prev_dy, _, weights_prev_dy = raw2outputs_warp(raw_dino_prev, raw_rgba_prev,
+    sal_map_prev_dy, dino_map_prev_dy, rgb_map_prev_dy, _, weights_prev_dy = raw2outputs_warp(raw_sal_prev, raw_dino_prev, raw_rgba_prev,
                                                            z_vals, rays_d, 
                                                            raw_noise_std)
-
+    ret['sal_map_prev_dy'] = sal_map_prev_dy
     ret['dino_map_prev_dy'] = dino_map_prev_dy
     ret['raw_sf_prev2ref'] = raw_sf_prev2ref
     ret['rgb_map_prev_dy'] = rgb_map_prev_dy
@@ -1905,22 +1931,25 @@ def render_rays(img_idx,
     # render points at t + 1
     raw_post = network_query_fn(pts_post, viewdirs, network_fn)
     raw_rgba_post = raw_post[:, :, :4]
+    raw_dino_post = None
+    raw_sal_post = None
     if dino_ch > 0:
         raw_dino_post = raw_post[:, :, 4:4+dino_ch]
-    else:
-        raw_dino_post = None
-    raw_sf_post2ref = raw_post[:, :, 4+dino_ch:7+dino_ch]
-    raw_sf_post2postpost = raw_post[:, :, 7+dino_ch:10+dino_ch]
+        if sal_ch > 0:
+            raw_sal_post = raw_post[:, :, 4+dino_ch:5+dino_ch]
+    raw_sf_post2ref = raw_post[:, :, 4+dino_ch+sal_ch:7+dino_ch+sal_ch]
+    raw_sf_post2postpost = raw_post[:, :, 7+dino_ch+sal_ch:10+dino_ch+sal_ch]
 
-    dino_map_post_dy, rgb_map_post_dy, _, weights_post_dy = raw2outputs_warp(raw_dino_post, raw_rgba_post,
+    sal_map_post_dy, dino_map_post_dy, rgb_map_post_dy, _, weights_post_dy = raw2outputs_warp(raw_sal_post, raw_dino_post, raw_rgba_post,
                                                            z_vals, rays_d, 
                                                            raw_noise_std)
+    ret["sal_map_post_dy"] = sal_map_post_dy
     ret["dino_map_post_dy"] = dino_map_post_dy
     ret['raw_sf_post2ref'] = raw_sf_post2ref
     ret['rgb_map_post_dy'] = rgb_map_post_dy
 
-    raw_prob_ref2prev = raw_ref[:, :, 10+dino_ch]
-    raw_prob_ref2post = raw_ref[:, :, 11+dino_ch]
+    raw_prob_ref2prev = raw_ref[:, :, 10+dino_ch+sal_ch]
+    raw_prob_ref2post = raw_ref[:, :, 11+dino_ch+sal_ch]
 
     prob_map_prev = compute_2d_prob(weights_prev_dy,
                                     raw_prob_ref2prev)
@@ -1946,15 +1975,19 @@ def render_rays(img_idx,
         if chain_5frames:
             raw_prevprev = network_query_fn(pts_prevprev, viewdirs, network_fn)
             raw_rgba_prevprev = raw_prevprev[:, :, :4]
+            raw_dino_prevprev = None
+            raw_sal_prevprev = None
             if dino_ch > 0:
                 raw_dino_prevprev = raw_prevprev[:, :, 4:4+dino_ch]
-            else:
-                raw_dino_prevprev = None
+                if sal_ch > 0:
+                    raw_sal_prevprev = raw_prevprev[:, :, 4+dino_ch:5+dino_ch]
+                
 
             # render from t - 2
-            dino_map_prevprev_dy, rgb_map_prevprev_dy, _, weights_prevprev_dy = raw2outputs_warp(raw_dino_prevprev, raw_rgba_prevprev, 
+            sal_map_prevprev_dy, dino_map_prevprev_dy, rgb_map_prevprev_dy, _, weights_prevprev_dy = raw2outputs_warp(raw_sal_prevprev, raw_dino_prevprev, raw_rgba_prevprev, 
                                                                            z_vals, rays_d, 
                                                                            raw_noise_std)
+            ret["sal_map_pp_dy"] = sal_map_prevprev_dy
             ret['dino_map_pp_dy'] = dino_map_prevprev_dy
             ret['rgb_map_pp_dy'] = rgb_map_prevprev_dy
 
@@ -1967,15 +2000,18 @@ def render_rays(img_idx,
         if chain_5frames:
             raw_postpost = network_query_fn(pts_postpost, viewdirs, network_fn)
             raw_rgba_postpost = raw_postpost[:, :, :4]
+            raw_dino_postpost = None
+            raw_sal_postpost = None
             if dino_ch > 0:
                 raw_dino_postpost = raw_postpost[:, :, 4:4+dino_ch]
-            else:
-                raw_dino_postpost = None
+                if sal_ch > 0:
+                    raw_sal_postpost = raw_postpost[:, :, 4+dino_ch:5+dino_ch]
 
             # render from t + 2
-            dino_map_postpost_dy, rgb_map_postpost_dy, _, weights_postpost_dy = raw2outputs_warp(raw_dino_postpost, raw_rgba_postpost, 
+            sal_map_postpost_dy, dino_map_postpost_dy, rgb_map_postpost_dy, _, weights_postpost_dy = raw2outputs_warp(raw_sal_postpost, raw_dino_postpost, raw_rgba_postpost, 
                                                                            z_vals, rays_d, 
                                                                            raw_noise_std)
+            ret["sal_map_pp_dy"] = sal_map_postpost_dy
             ret["dino_map_pp_dy"] = dino_map_postpost_dy
             ret['rgb_map_pp_dy'] = rgb_map_postpost_dy
 

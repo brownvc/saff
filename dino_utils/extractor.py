@@ -314,7 +314,8 @@ class ViTExtractor:
         curr_feats = self._feats[0] #Bxhxtxt
         cls_attn_map = curr_feats[:, head_idxs, 0, 1:].mean(dim=1) #Bx(t-1)
         temp_mins, temp_maxs = cls_attn_map.min(dim=1)[0], cls_attn_map.max(dim=1)[0]
-        cls_attn_maps = (cls_attn_map - temp_mins) / (temp_maxs - temp_mins)  # normalize to range [0,1]
+        #assert False, [cls_attn_map.shape, temp_mins.shape, temp_maxs.shape, temp_mins.shape]
+        cls_attn_maps = (cls_attn_map - temp_mins[:, None]) / (temp_maxs[:, None] - temp_mins[:, None])  # normalize to range [0,1]
         return cls_attn_maps
 
 """ taken from https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse"""

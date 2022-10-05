@@ -7,6 +7,7 @@ Neural-Scene-Flow-Fields/nsff_scripts/viz_*
 Neural-Scene-Flow-Fields/nsff_exp/logs
 Neural-Scene-Flow-Fields/nsff_scripts/*.zip
 data/*
+slurms/*
 *.zip
 Neural-Scene-Flow-Fields/nsff_scripts/__pycache__/*
 Neural-Scene-Flow-Fields/nsff_exp/__pycache__/*

@@ -997,20 +997,30 @@ def train():
                                 global_step=i, dataformats='HWC')
                 writer.add_image("val/depth_map_ref", normalize_depth(ret['depth_map_ref']), 
                                 global_step=i, dataformats='HW')
+                
+                if args.dino_coe > 0 and args.sal_coe > 0:
+                    writer.add_image("val/sal_map_ref", torch.clamp(ret["sal_map_ref"][..., 0], 0., 1.),
+                                global_step=i, dataformats='HW')
 
                 writer.add_image("val/rgb_map_rig", torch.clamp(ret['rgb_map_rig'], 0., 1.), 
                                 global_step=i, dataformats='HWC')
                 writer.add_image("val/depth_map_rig", normalize_depth(ret['depth_map_rig']), 
+                                global_step=i, dataformats='HW')
+                if args.dino_coe > 0 and args.sal_coe > 0:
+                    writer.add_image("val/sal_map_rig", torch.clamp(ret['sal_map_rig'][..., 0], 0., 1.), 
                                 global_step=i, dataformats='HW')
 
                 writer.add_image("val/rgb_map_ref_dy", torch.clamp(ret['rgb_map_ref_dy'], 0., 1.), 
                                 global_step=i, dataformats='HWC')
                 writer.add_image("val/depth_map_ref_dy", normalize_depth(ret['depth_map_ref_dy']), 
                                 global_step=i, dataformats='HW')
+                if args.dino_coe > 0 and args.sal_coe > 0:
+                    writer.add_image("val/sal_map_ref_dy", torch.clamp(ret['sal_map_ref_dy'][..., 0], 0., 1.), 
+                                global_step=i, dataformats='HW')
 
                 # writer.add_image("val/rgb_map_pp_dy", torch.clamp(ret['rgb_map_pp_dy'], 0., 1.), 
                                 # global_step=i, dataformats='HWC')
-
+                
                 writer.add_image("val/gt_rgb", target, 
                                 global_step=i, dataformats='HWC')
                 writer.add_image("val/monocular_disp", 

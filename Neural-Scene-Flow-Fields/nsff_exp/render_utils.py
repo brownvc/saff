@@ -11,6 +11,13 @@ from run_nerf_helpers import *
 from tqdm import tqdm
 import open3d as o3d
 from vis_dino import *
+from sklearn.cluster import SpectralClustering, DBSCAN
+import pickle
+import hdbscan
+from finch import FINCH
+import kornia
+import copy
+from sklearn.decomposition import PCA
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEBUG = False
@@ -726,13 +733,13 @@ def render_pcd_color(render_poses, bt_poses,
 
         # filename = os.path.join(save_depth_dir, '{:03d}.jpg'.format(i))
         # imageio.imwrite(filename, depth8)
-def render_pcd_cluster(algorithm, centroids, salient_labels, render_poses, bt_poses, 
+def render_pcd_cluster(index, salient_labels, render_poses, bt_poses, 
                      hwf, chunk, render_kwargs, 
                      gt_imgs=None, savedir=None, 
                      render_factor=0, target_idx=10,
                      alpha_threshold=0.2):
     # import scipy.io
-
+    
     H, W, focal = hwf
 
     if render_factor!=0:
@@ -799,6 +806,7 @@ def render_pcd_cluster(algorithm, centroids, salient_labels, render_poses, bt_po
                         return_sem=True,
                         **render_kwargs)
         ret1["raw_dino"] = ret1["raw_dino"].cpu()
+        
         ret2 = render_sm(img_idx_embed_2, 0, False,
                         num_img, 
                         H, W, focal, 
@@ -868,7 +876,7 @@ def render_pcd_cluster(algorithm, centroids, salient_labels, render_poses, bt_po
             pts = torch.nn.functional.normalize(pts, dim=-1)
             normalized_all_descriptors = torch.cat([norm.cpu(), pts], dim=-1).contiguous().numpy()
             
-            _, labels = algorithm.index.search(normalized_all_descriptors.astype(np.float32), 1)
+            _, labels = index.search(normalized_all_descriptors.astype(np.float32), 1)
             labels[~np.isin(labels, salient_labels)] = -1
             #assert False, [norm.shape, pts.shape, labels.shape]
             tmp["final_labels"][~empty_region.view(-1), j] = torch.from_numpy(labels[:, 0])
@@ -921,6 +929,1313 @@ def render_pcd_cluster(algorithm, centroids, salient_labels, render_poses, bt_po
 
         # filename = os.path.join(save_depth_dir, '{:03d}.jpg'.format(i))
         # imageio.imwrite(filename, depth8)
+
+def dbscan_predict(model, X):
+
+    nr_samples = X.shape[0]
+
+    y_new = np.ones(shape=nr_samples, dtype=int) * -1
+
+    for i in tqdm(range(nr_samples)):
+        diff = model.components_ - X[i, :]  # NumPy broadcasting
+
+        dist = np.linalg.norm(diff, axis=1)  # Euclidean distance
+
+        shortest_dist_idx = np.argmin(dist)
+
+        if dist[shortest_dist_idx] < model.eps:
+            y_new[i] = model.labels_[model.core_sample_indices_[shortest_dist_idx]]
+
+    return y_new
+
+def render_pcd_cluster_3D(index, small_index, salient_labels, render_poses, img_idx_embeds, 
+                     hwf, chunk, render_kwargs, 
+                     dino_weight, flow_weight, gt_imgs=None, savedir=None, 
+                     render_factor=0, target_idx=10,
+                     alpha_threshold=0.2):
+    # import scipy.io
+    
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None
+    }
+    
+    #splat_raw_1 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+    #splat_raw_2 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+    num_img = render_poses.shape[0]
+    #for i, cur_time in enumerate(np.linspace(target_idx - 10., target_idx + 10., 200 + 1).tolist()):
+    for i in range(num_img):
+        cur_time = i
+
+        int_rot, int_trans = render_poses[cur_time, :3, :3], render_poses[cur_time, :3, 3]
+
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        #img_idx_embed = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+        img_idx_embed = img_idx_embeds[i]
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        None, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        #ret1["raw_dino"] = ret1["raw_dino"].cpu()
+        
+        #ret2 = render_sm(img_idx_embed_2, 0, False,
+        #                num_img, 
+        #                H, W, focal, 
+        #                chunk=1024*16, 
+        #                c2w=tmp["render_pose"],
+        #                return_sem=True, 
+        #                **render_kwargs)
+        
+        #T_i = torch.ones((1, H, W))
+        num_sample = ret['raw_rgb'].shape[2]
+        
+        # get opaque filter to only remain non-empty space points
+        opaque = 1. - (1. - ret["raw_alpha"])*(1. - ret["raw_alpha_rigid"]) 
+        opaque = opaque > alpha_threshold
+        #opaque = opaque & (ret["raw_alpha"]/(ret["raw_alpha"] + ret["raw_alpha_rigid"] )  > 0.5)
+        #tmp["dinos"] = tmp["dinos"][opaque, :]
+        #tmp["sals"] = tmp["sals"][opaque, :]
+        #tmp["points"] = tmp["sals"][opaque, :]
+        # get each sample's dino feature
+        #assert False, [opaque.shape, opaque.device, ret["raw_alpha"][opaque].shape, ret["raw_dino"][opaque, :].shape]
+        tmp["colors"] = ret["raw_alpha"][opaque][..., None] * ret["raw_rgb"][opaque, :] + ret["raw_alpha_rigid"][opaque][..., None] * ret["raw_rgb_rigid"][opaque, :]
+        tmp["colors"] /= (ret["raw_alpha"][opaque][..., None]+ret["raw_alpha_rigid"][opaque][..., None])
+        
+        tmp["dinos"] = ret["raw_alpha"][opaque][..., None].cuda() * ret["raw_dino"][opaque, :] + ret["raw_alpha_rigid"][opaque][..., None].cuda() * ret["raw_dino_rigid"][opaque, :]
+        tmp["dinos"] /= (ret["raw_alpha"][opaque][..., None].cuda()+ret["raw_alpha_rigid"][opaque][..., None].cuda())
+        # get each sample's saliency information
+        tmp["sals"] = ret["raw_alpha"][opaque][..., None] * ret["raw_sal"][opaque, :]  + ret["raw_alpha_rigid"][opaque][..., None] * ret["raw_sal_rigid"][opaque, :] 
+        tmp["sals"] /= (ret["raw_alpha"][opaque][..., None]+ret["raw_alpha_rigid"][opaque][..., None])
+        # get each sample's 3D position in ndc space
+        #tmp["z_vals"] = 
+        #assert False, [ret["rays_o"][None, :].shape]
+        #assert False, [ret["rays_o"][:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :].shape]
+        tmp["points"] = ret["rays_o"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] + ret["rays_d"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] * \
+                        ret["z_vals"][opaque][:, None]
+        #tmp["points"] = ret['rays_o'][opaque,None,:] + ret['rays_d'][opaque,None,:]* (ret['z_vals'][opaque,:,None])
+        tmp["dy"] = ret["raw_alpha"][opaque][..., None]/(ret["raw_alpha"][opaque][..., None] + ret["raw_alpha_rigid"][opaque][..., None])
+
+        tmp["sf_prev"] = ret["raw_sf_ref2prev"][opaque]
+        tmp["sf_post"] = ret["raw_sf_ref2post"][opaque]
+        #tmp["dinos"] = 
+        #torch.save(samples["dinos"] / normed, os.path.join(savedir, "dino_normalizer.pt") )
+        #samples["dinos"] = normed
+
+        #samples["sals"] = 2.*samples["sals"] - 1.
+        # points are roughly between -1 and 1; no modification for now
+        #assert False, [torch.max(samples["points"][:, 0]), torch.min(samples["points"][:, 0]),
+        #               torch.max(samples["points"][:, 1]), torch.min(samples["points"][:, 1]),
+        #            torch.max(samples["points"][:, 2]), torch.min(samples["points"][:, 2]),]
+        #samples["points"] /= math.sqrt(samples["points"].shape[-1])
+        #tmp["points"] = 
+        #torch.save(samples["points"] / normed, os.path.join(savedir, "point_normalizer.pt") )
+        #samples["points"] = normed
+        #tmp['times'] = 
+    
+        #assert False, samples["dinos"].shape
+        #assert False, [(k, samples[k].shape) for k in samples]
+        #assert False, [tmp["dinos"].device, 
+        #    tmp["points"].device,
+        #    tmp["times"].device]
+        feature = torch.cat([
+            #torch.nn.functional.normalize(tmp["colors"], dim=-1),
+            torch.nn.functional.normalize(tmp["dinos"], dim=-1).cpu() * dino_weight, 
+            #tmp["sals"],
+            tmp["dy"],
+            torch.nn.functional.normalize(tmp["sf_prev"], dim=-1) * flow_weight,
+            torch.nn.functional.normalize(tmp["sf_post"], dim=-1) * flow_weight,
+            torch.nn.functional.normalize(tmp["points"], dim=-1),
+            torch.ones_like(tmp["sals"])*img_idx_embed,],
+            dim=-1).numpy()
+        #assert False, feature.shape
+        
+
+        _, large_labels = index.search(feature, 1)
+        #feature[:, :64] *= 0
+        #assert False, feature[..., -4:].shape
+        _, labels = small_index.search(feature, 1)
+        #_, labels = small_index.search(np.ascontiguousarray(feature[..., -4:]), 1)
+        labels[~np.isin(large_labels, salient_labels)] = -1
+        large_labels[~np.isin(large_labels, salient_labels)] = -1
+        #labels = large_labels      
+        #dbscan
+        #labels = -np.ones_like(large_labels)
+        #assert False, labels[np.isin(large_labels, salient_labels)].shape
+        #labels[np.isin(large_labels, salient_labels)] = dbscan_predict(small_index, feature[np.isin(large_labels, salient_labels)[:, 0]])
+        #labels = labels[:, None]
+
+        #hdbscan
+        #labels = -np.ones_like(large_labels)
+        #assert False, labels.shape
+        #assert False, hdbscan.prediction.membership_vector(small_index, feature[np.isin(large_labels, salient_labels)[:, 0]]).shape
+        #labels[np.isin(large_labels, salient_labels)] = np.argmax(hdbscan.prediction.membership_vector(small_index, feature[np.isin(large_labels, salient_labels)[:, 0]]), axis=1)
+        #labels[np.isin(large_labels, salient_labels)],_ = hdbscan.approximate_predict(small_index, feature[np.isin(large_labels, salient_labels)[:, 0], -4:])
+        #assert False, np.unique(labels)
+
+        tmp["final_labels"] = d3_41_colors_rgb_tensor[labels]/255.
+        #sal_space = tmp["dy"][..., 0] > 0.5
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(tmp["points"].view(-1, 3).numpy())
+        pcd.colors = o3d.utility.Vector3dVector(tmp["final_labels"].view(-1, 3).cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}.ply'.format(i)), pcd)
+
+        tmp["final_labels"] = d3_41_colors_rgb_tensor[large_labels]/255.
+        pcd.colors = o3d.utility.Vector3dVector(tmp["final_labels"].view(-1, 3).cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}_large.ply'.format(i)), pcd)
+
+        for entry in ret:
+            ret[entry] = None
+        for entry in tmp:
+            tmp[entry] = None
+        #assert False, [np.unique(labels), np.unique(hdbscan.approximate_predict(small_index, feature))]
+        assert False, [np.unique(large_labels), np.unique(labels)]
+def render_sal_3D(render_poses, img_idx_embeds, 
+                     hwf, chunk, render_kwargs, 
+                     gt_imgs=None, savedir=None, 
+                     render_factor=0, target_idx=10,
+                     alpha_threshold=0.2):
+    # import scipy.io
+    
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None
+    }
+    
+    #splat_raw_1 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+    #splat_raw_2 = {'splat_raw_rgba_dy':None, 'splat_raw_rgba_rig': None}
+    num_img = render_poses.shape[0]
+    #for i, cur_time in enumerate(np.linspace(target_idx - 10., target_idx + 10., 200 + 1).tolist()):
+    for i in range(num_img):
+        cur_time = i
+
+        int_rot, int_trans = render_poses[cur_time, :3, :3], render_poses[cur_time, :3, 3]
+
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        #img_idx_embed = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+        img_idx_embed = img_idx_embeds[i]
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        None, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        #ret1["raw_dino"] = ret1["raw_dino"].cpu()
+        
+        #ret2 = render_sm(img_idx_embed_2, 0, False,
+        #                num_img, 
+        #                H, W, focal, 
+        #                chunk=1024*16, 
+        #                c2w=tmp["render_pose"],
+        #                return_sem=True, 
+        #                **render_kwargs)
+        
+        #T_i = torch.ones((1, H, W))
+        num_sample = ret['raw_rgb'].shape[2]
+        
+        # get opaque filter to only remain non-empty space points
+        opaque = 1. - (1. - ret["raw_alpha"])*(1. - ret["raw_alpha_rigid"]) 
+        opaque = opaque > alpha_threshold
+        #opaque = opaque & (ret["raw_alpha"]/(ret["raw_alpha"] + ret["raw_alpha_rigid"] )  > 0.5)
+        #tmp["dinos"] = tmp["dinos"][opaque, :]
+        #tmp["sals"] = tmp["sals"][opaque, :]
+        #tmp["points"] = tmp["sals"][opaque, :]
+        # get each sample's dino feature
+        #assert False, [opaque.shape, opaque.device, ret["raw_alpha"][opaque].shape, ret["raw_dino"][opaque, :].shape]
+        #tmp["dinos"] = ret["raw_alpha"][opaque][..., None].cuda() * ret["raw_dino"][opaque, :] + ret["raw_alpha_rigid"][opaque][..., None].cuda() * ret["raw_dino_rigid"][opaque, :]
+        #tmp["dinos"] /= (ret["raw_alpha"][opaque][..., None].cuda()+ret["raw_alpha_rigid"][opaque][..., None].cuda())
+        # get each sample's saliency information
+        tmp["sals"] = ret["raw_alpha"][opaque][..., None] * ret["raw_sal"][opaque, :]  + ret["raw_alpha_rigid"][opaque][..., None] * ret["raw_sal_rigid"][opaque, :] 
+        tmp["sals"] /= (ret["raw_alpha"][opaque][..., None]+ret["raw_alpha_rigid"][opaque][..., None])
+        # get each sample's 3D position in ndc space
+        #tmp["z_vals"] = 
+        #assert False, [ret["rays_o"][None, :].shape]
+        #assert False, [ret["rays_o"][:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :].shape]
+        tmp["points"] = ret["rays_o"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] + ret["rays_d"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] * \
+                        ret["z_vals"][opaque][:, None]
+        #tmp["points"] = ret['rays_o'][opaque,None,:] + ret['rays_d'][opaque,None,:]* (ret['z_vals'][opaque,:,None])
+        tmp["dy"] = ret["raw_alpha"][opaque][..., None]/(ret["raw_alpha"][opaque][..., None] + ret["raw_alpha_rigid"][opaque][..., None])
+
+        #tmp["dinos"] = 
+        #torch.save(samples["dinos"] / normed, os.path.join(savedir, "dino_normalizer.pt") )
+        #samples["dinos"] = normed
+
+        #samples["sals"] = 2.*samples["sals"] - 1.
+        # points are roughly between -1 and 1; no modification for now
+        #assert False, [torch.max(samples["points"][:, 0]), torch.min(samples["points"][:, 0]),
+        #               torch.max(samples["points"][:, 1]), torch.min(samples["points"][:, 1]),
+        #            torch.max(samples["points"][:, 2]), torch.min(samples["points"][:, 2]),]
+        #samples["points"] /= math.sqrt(samples["points"].shape[-1])
+        #tmp["points"] = 
+        #torch.save(samples["points"] / normed, os.path.join(savedir, "point_normalizer.pt") )
+        #samples["points"] = normed
+        #tmp['times'] = 
+    
+        #assert False, samples["dinos"].shape
+        #assert False, [(k, samples[k].shape) for k in samples]
+        #assert False, [tmp["dinos"].device, 
+        #    tmp["points"].device,
+        #    tmp["times"].device]
+        #feature = torch.cat([
+        #    torch.nn.functional.normalize(tmp["dinos"], dim=-1).cpu(), 
+        #    #tmp["sals"],
+        #    tmp["dy"],
+        #    torch.nn.functional.normalize(tmp["points"], dim=-1),
+        #    torch.ones_like(tmp["sals"])*img_idx_embed,],
+        #    dim=-1).numpy()
+        #assert False, feature.shape
+        
+
+        #_, labels = index.search(feature, 1)
+        #labels[~np.isin(labels, salient_labels)] = -1
+        #feature = feature[::1000]
+        #labels = dbscan_predict(clustering, feature)[:, None]
+        #tmp["final_labels"] = d3_41_colors_rgb_tensor[labels]/255.
+        #sal_space = tmp["dy"][..., 0] > 0.5
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(tmp["points"].view(-1, 3).numpy())
+        pcd.colors = o3d.utility.Vector3dVector(tmp["sals"].view(-1, 1).repeat(1, 3).cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}.ply'.format(i)), pcd)
+
+        #salient = tmp["sals"][..., 0] > 0.5
+        #pcd.points = o3d.utility.Vector3dVector(tmp["points"][salient].view(-1, 3).numpy())
+        pcd.colors = o3d.utility.Vector3dVector(tmp["dy"].view(-1, 1).repeat(1, 3).cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}_dy.ply'.format(i)), pcd)
+        
+        # adaptive select mass of the saliency
+        mass = 0.5
+        total = torch.sum(tmp["sals"][..., 0])
+        while True:
+            cur= torch.sum(tmp["sals"][..., 0] * (tmp["sals"][..., 0] > np.quantile(tmp["sals"][..., 0], 1-mass)))
+            if cur < total / 2.:
+                break
+            mass = 0.5*mass
+        salient = tmp["sals"][..., 0] > np.quantile(tmp["sals"][..., 0], 1-mass)
+        print(mass)
+        pcd.points = o3d.utility.Vector3dVector(tmp["points"][salient].view(-1, 3).numpy())
+        pcd.colors = o3d.utility.Vector3dVector(tmp["sals"][salient].view(-1, 1).repeat(1, 3).cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}_sal.ply'.format(i)), pcd)
+
+        mass_sal = mass
+        mass = 0.5
+        total = torch.sum(tmp["dy"][..., 0])
+        while True:
+            cur= torch.sum(tmp["dy"][..., 0] * (tmp["dy"][..., 0] > np.quantile(tmp["dy"][..., 0], 1-mass)))
+            if cur < total / 2.:
+                break
+            mass = 0.5*mass
+        #salient = tmp["sals"][..., 0] > np.quantile(tmp["sals"][..., 0], 1-mass)
+        print(mass)
+        
+        salient = (tmp["sals"][..., 0] > np.quantile(tmp["sals"][..., 0], 1-mass_sal)) & (tmp["dy"][..., 0] > np.quantile(tmp["dy"][..., 0], 1-mass))
+        pcd.points = o3d.utility.Vector3dVector(tmp["points"][salient].view(-1, 3).numpy())
+        pcd.colors = o3d.utility.Vector3dVector(tmp["sals"][salient].view(-1, 1).repeat(1, 3).cpu().numpy())
+        o3d.io.write_point_cloud(os.path.join(save_pcd_dir, '{:03d}_sal_both.ply'.format(i)), pcd)
+
+        print(np.quantile(tmp["sals"][..., 0], 0.75), np.quantile(tmp["dy"][..., 0], 0.75))
+        print(np.quantile(tmp["sals"][..., 0], 0.9), np.quantile(tmp["dy"][..., 0], 0.9))
+        print(np.quantile(tmp["sals"][..., 0], 0.95), np.quantile(tmp["dy"][..., 0], 0.95))
+        print(np.quantile(tmp["sals"][..., 0], 1-mass_sal), np.quantile(tmp["dy"][..., 0], 1-mass))
+
+
+
+        for entry in ret:
+            ret[entry] = None
+        for entry in tmp:
+            tmp[entry] = None
+        assert False, "Pause"
+
+def cluster_pcd(render_poses, 
+                     hwf, chunk, render_kwargs, 
+                     dino_weight,
+                     flow_weight,
+                     quant_index=None,
+                     index=None,
+                     salient_labels=None,
+                     savedir=None, 
+                     render_factor=0, 
+                     alpha_threshold=0.2,
+                     sample_interval=20,
+                     n_cluster=10,
+                     thresh=0.01,
+                     votes_percentage=75):
+    # import scipy.io
+    torch.manual_seed(0)
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    #save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    #save_cls_dir = os.path.join(savedir, 'cls')
+    os.makedirs(savedir, exist_ok=True)
+    #os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None,
+        "dinos": None,
+        "sals": None
+    }
+    
+
+    samples = {
+        "dinos": None,
+        "times": None,
+        "sals": None,
+        "points": None
+
+    }
+
+    num_img = render_poses.shape[0]    
+    #num_img = 2
+    
+    '''store all non-opaque points and shuffle'''
+    ret = {}  
+    num_samples_per_image = []
+    for i in tqdm(range(num_img)):
+        cur_time = i
+        #flow_time = int(np.floor(cur_time))
+        #ratio = cur_time - np.floor(cur_time)
+        #print('cur_time ', i, cur_time, ratio)
+        #t = time.time()
+
+        #int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+        #                                        render_poses[flow_time, :3, :3],
+        #                                        render_poses[flow_time + 1, :3, 3], 
+        #                                        render_poses[flow_time + 1, :3, :3], 
+        #                                        ratio)
+        int_rot = render_poses[cur_time, :3, :3]
+        int_trans = render_poses[cur_time, :3, 3]
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        img_idx_embed = cur_time/float(num_img) * 2. - 1.0
+        #img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        num_sample = ret['raw_rgb'].shape[2]
+        
+
+        # get opaque filter to only remain non-empty space points
+        opaque = 1. - (1. - ret["raw_alpha"])*(1. - ret["raw_alpha_rigid"]) 
+        opaque = opaque > alpha_threshold
+        tmp["dy"] = ret["raw_alpha"]/(ret["raw_alpha"] + ret["raw_alpha_rigid"])
+        #opaque = opaque & (tmp["dy"] > 0.5)
+
+        #tmp["dinos"] = tmp["dinos"][opaque, :]
+        #tmp["sals"] = tmp["sals"][opaque, :]
+        #tmp["points"] = tmp["sals"][opaque, :]
+        # get each sample's dino feature
+        #assert False, [opaque.shape, opaque.device, ret["raw_alpha"][opaque].shape, ret["raw_dino"][opaque, :].shape]
+        tmp["colors"] = ret["raw_alpha"][opaque][..., None] * ret["raw_rgb"][opaque, :] + ret["raw_alpha_rigid"][opaque][..., None] * ret["raw_rgb_rigid"][opaque, :]
+        tmp["colors"] /= (ret["raw_alpha"][opaque][..., None]+ret["raw_alpha_rigid"][opaque][..., None])
+        
+        tmp["dinos"] = ret["raw_alpha"][opaque][..., None].cuda() * ret["raw_dino"][opaque, :] + ret["raw_alpha_rigid"][opaque][..., None].cuda() * ret["raw_dino_rigid"][opaque, :]
+        tmp["dinos"] /= (ret["raw_alpha"][opaque][..., None].cuda()+ret["raw_alpha_rigid"][opaque][..., None].cuda())
+        # get each sample's saliency information
+        tmp["sals"] = ret["raw_alpha"][opaque][..., None] * ret["raw_sal"][opaque, :]  + ret["raw_alpha_rigid"][opaque][..., None] * ret["raw_sal_rigid"][opaque, :] 
+        tmp["sals"] /= (ret["raw_alpha"][opaque][..., None]+ret["raw_alpha_rigid"][opaque][..., None])
+        # get each sample's 3D position in ndc space
+        #tmp["z_vals"] = 
+        #assert False, [ret["rays_o"][None, :].shape]
+        #assert False, [ret["rays_o"][:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :].shape]
+        tmp["points"] = ret["rays_o"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] + ret["rays_d"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] * \
+                        ret["z_vals"][opaque][:, None]
+        #tmp["points"] = ret['rays_o'][opaque,None,:] + ret['rays_d'][opaque,None,:]* (ret['z_vals'][opaque,:,None])
+        tmp["dy"] = tmp["dy"][opaque][:, None]
+        tmp["sf_prev"] = ret["raw_sf_ref2prev"][opaque]
+        tmp["sf_post"] = ret["raw_sf_ref2post"][opaque]               
+
+        # shuffle the points before selection
+        indices = torch.randperm(tmp["dinos"].size()[0])
+        tmp["colors"] = tmp["colors"][indices, :]
+        tmp["dinos"] = tmp["dinos"][indices.cuda(), :]
+        tmp["sals"] = tmp["sals"][indices, :]
+        tmp["points"] = tmp["points"][indices, :]
+        tmp["dy"] = tmp["dy"][indices, :]
+        tmp["sf_prev"] = tmp["sf_prev"][indices, :]
+        tmp["sf_post"] = tmp["sf_post"][indices, :]
+
+        # select sample points for cluster at this time step
+        if i == 0:
+            samples["times"] = torch.ones_like(tmp["sals"])[::sample_interval, :] * img_idx_embed
+            samples["dinos"] = tmp["dinos"][::sample_interval, :].cpu()
+            samples["sals"] = tmp["sals"][::sample_interval, :]
+            samples["points"] = tmp["points"][::sample_interval, :]
+            samples["dy"] = tmp["dy"][::sample_interval, :]
+            samples["colors"] = tmp["colors"][::sample_interval, :]
+            samples["sf_prev"] = tmp["sf_prev"][::sample_interval, :]
+            samples["sf_post"] = tmp["sf_post"][::sample_interval, :]
+            num_samples_per_image.append(samples["times"].shape[0])
+        else:
+            
+            samples["times"] = torch.cat((samples["times"], torch.ones_like(tmp["sals"])[::sample_interval, :] * img_idx_embed), dim=0)
+            samples["dinos"] = torch.cat((samples["dinos"], tmp["dinos"][::sample_interval, :].cpu()), dim=0)
+            samples["sals"] = torch.cat((samples["sals"], tmp["sals"][::sample_interval, :]), dim=0)
+            samples["points"] = torch.cat((samples["points"], tmp["points"][::sample_interval, :]), dim=0)
+            samples["dy"] = torch.cat((samples["dy"], tmp["dy"][::sample_interval, :]), dim=0)
+            samples["colors"] = torch.cat((samples["colors"], tmp["colors"][::sample_interval, :]), dim=0)
+            samples["sf_prev"] = torch.cat((samples["sf_prev"], tmp["sf_prev"][::sample_interval, :]), dim=0)
+            samples["sf_post"] = torch.cat((samples["sf_post"], tmp["sf_post"][::sample_interval, :]), dim=0)
+            num_samples_per_image.append(samples["times"].shape[0])
+        for key in tmp:
+            tmp[key] = None
+        for key in ret:
+            ret[key] = None
+        torch.cuda.empty_cache()
+            
+    
+        
+    ## not working!!! as dino values are too far away from normalized!   
+    # normalize each domain so that they first fall between -1 and 1, then is divided by their dimension
+    # this is the way used in vanilla transformer
+    #samples["dinos"] /= math.sqrt(samples["dinos"].shape[-1])
+    
+    normed = torch.nn.functional.normalize(samples["dinos"], dim=-1)
+    #torch.save(samples["dinos"] / normed, os.path.join(savedir, "dino_normalizer.pt") )
+    samples["dinos"] = normed
+
+    #samples["sals"] = 2.*samples["sals"] - 1.
+    # points are roughly between -1 and 1; no modification for now
+    #assert False, [torch.max(samples["points"][:, 0]), torch.min(samples["points"][:, 0]),
+    #               torch.max(samples["points"][:, 1]), torch.min(samples["points"][:, 1]),
+    #            torch.max(samples["points"][:, 2]), torch.min(samples["points"][:, 2]),]
+    #samples["points"] /= math.sqrt(samples["points"].shape[-1])
+    normed = torch.nn.functional.normalize(samples["points"], dim=-1)
+    #torch.save(samples["points"] / normed, os.path.join(savedir, "point_normalizer.pt") )
+    samples["points"] = normed
+    
+    #assert False, samples["dinos"].shape
+    #assert False, [(k, samples[k].shape) for k in samples]
+    feature = torch.cat([
+        #torch.nn.functional.normalize(samples["colors"], dim=-1),
+        samples["dinos"]*dino_weight, 
+     #   samples["sals"],
+        samples["dy"],
+        torch.nn.functional.normalize(samples["sf_prev"], dim=-1) * flow_weight,
+        torch.nn.functional.normalize(samples["sf_post"], dim=-1) * flow_weight,
+        samples["points"],
+        samples["times"],],
+        dim=-1).numpy()
+    #ngpus = faiss.get_num_gpus()
+    #assert False, ngpus
+    if True or quant_index is None or index is None or salient_labels is None:
+        print(f"start clustering on {len(feature)} points...")
+        
+        ''' GPU version not successful :< only one class 
+        res = faiss.StandardGpuResources()
+        #flat_config = faiss.GpuIndexFlatConfig()
+        #flat_config.device = 0
+        #quantizer = faiss.GpuIndexFlatL2(res, feature.shape[-1], flat_config)
+        feature = samples["dinos"].cpu().numpy()      
+        M = int(feature.shape[-1] / 4)  # for PQ: #subquantizers
+        nbits_per_index = 8  # for PQ
+        nlist = 1024 # for PQ
+        #assert False, [feature.shape[-1], M]
+        quant_index = faiss.GpuIndexIVFPQ(res, feature.shape[-1], nlist, M, nbits_per_index, faiss.METRIC_INNER_PRODUCT)
+        quant_index.train(feature)
+        D, I, R = quant_index.search_and_reconstruct(feature, 1)
+        assert False, [np.unique(D), np.unique(I), R.shape]
+        #quant_index.add(feature)
+        
+        
+        quantizer = faiss.ProductQuantizer(64, 8, 8)
+        dino_feat = np.ascontiguousarray(feature[:, :64])
+        quantizer.train(dino_feat)
+        codes = quantizer.compute_codes(dino_feat)
+        x2 = quantizer.decode(codes)
+        avg_relative_error = ((dino_feat- x2)**2).sum() / (dino_feat ** 2).sum()
+        assert False, avg_relative_error
+        '''
+        # faiss Kmeans
+        algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_cluster, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+        algorithm.train(feature)
+        faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "large.index")) 
+        _, labels = algorithm.index.search(feature, 1)
+        index = algorithm.index
+
+        # sklearn spectralclustering
+        # not working as too big an array
+        #clustering = SpectralClustering(n_clusters=n_cluster,
+        #assign_labels="discretize",
+        #random_state=0).fit(feature)
+        
+        # DBSCAN
+        #clustering = DBSCAN(eps=0.5, min_samples=5, n_jobs=4).fit(feature)
+        #labels = clustering.labels_[:, None]
+        #pickle.dump(clustering, open(os.path.join(savedir, "save.pkl"), "wb"))
+        #n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+        #assert False, [n_clusters_, labels.shape]
+        
+        labels_per_image = np.split(labels, num_samples_per_image)[:num_img]
+        #assert False, num_samples_per_image
+        #assert False, [len(labels_per_image), [label_per_image.shape for label_per_image in labels_per_image]]
+        saliency_maps_list = np.split(samples["dy"], num_samples_per_image)[:num_img]
+        
+        
+        votes = np.zeros(n_cluster)
+        for image_labels, saliency_map in zip(labels_per_image, saliency_maps_list):
+            for label in range(n_cluster):
+                #votes[label] += 1
+                #continue
+                if np.any(image_labels[:, 0] == label):
+                    label_saliency = (saliency_map[image_labels[:, 0] == label]).mean()
+                else:
+                    label_saliency = 0
+                print(label, label_saliency)
+                if label_saliency > thresh:
+                    votes[label] += 1
+        #assert False, votes
+        salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
+        
+        #salient_labels = np.unique(labels)
+        with open(os.path.join(savedir, "saliency.npy"), "wb") as f:
+            np.save(f, salient_labels) 
+        #assert False, [np.unique(labels), salient_labels]
+        #print(index.search(feature[:3], 1))
+        '''
+        input()
+        
+        # for now clustering version is slower?
+        algorithm = faiss.Clustering(
+            feature.shape[-1], 
+            n_cluster, 
+            )
+        algorithm.niter=300 
+        algorithm.nredo=10
+        algorithm.seed=1234 
+        algorithm.verbose=True
+        res = faiss.StandardGpuResources()
+        flat_config = faiss.GpuIndexFlatConfig()
+        flat_config.device = 0
+        flat_config.useFloat16 = False
+        index = faiss.GpuIndexFlatL2(res, feature.shape[-1], flat_config)
+        algorithm.train(feature, index) 
+        '''
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #
+        
+    else:
+        _, labels = index.search(feature, 1)
+    is_fg = np.isin(labels, salient_labels)
+    #assert False, is_fg.shape
+    #labels[~np.isin(labels, salient_labels)] = -1
+    #feature[:, :64]*=0.
+    feature = feature[is_fg[:, 0], :]
+    print(f"start clustering on {len(feature)} points...")
+    # faiss Kmeans
+    algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_cluster, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+    algorithm.train(feature)
+    faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "small.index")) 
+    #clustering = hdbscan.HDBSCAN(min_cluster_size=10, prediction_data=True)
+    #clustering.fit(feature)
+    #labels = clustering.labels_[:, None]
+    
+    #pickle.dump(clustering, open(os.path.join(savedir, "save.pkl"), "wb"))
+    #assert False, clustering.labels_.max()
+    #from scipy import spatial
+    centroids = algorithm.centroids
+    for c1 in range(len(centroids)):
+        item_1 = centroids[c1][:64]
+        for c2 in range(c1+1, len(centroids)):
+            item_2 = centroids[c2][:64]
+            sim = np.dot(item_1, item_2) / (np.linalg.norm(item_1) * np.linalg.norm(item_2))
+            print(c1, c2, sim)
+    assert False, "Pause"
+
+def cluster_2D(render_poses, 
+                     hwf, chunk, render_kwargs, 
+                     dino_weight,
+                     flow_weight,
+                     quant_index=None,
+                     index=None,
+                     salient_labels=None,
+                     savedir=None, 
+                     render_factor=0, 
+                     alpha_threshold=0.2,
+                     sample_interval=5,
+                     n_cluster=25,
+                     elbow=0.975,
+                     thresh=0.2,
+                     votes_percentage=80,
+                     similarity_thresh=0.4):
+    # import scipy.io
+    torch.manual_seed(0)
+    np.random.seed(0)
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    #save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    #save_cls_dir = os.path.join(savedir, 'cls')
+    os.makedirs(savedir, exist_ok=True)
+    #os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None,
+        "dinos": None,
+        "sals": None
+    }
+    
+
+    samples = {
+        "dinos": None,
+        "times": None,
+        "sals": None,
+        "points": None
+
+    }
+
+    num_img = render_poses.shape[0]    
+    #num_img = 2
+    
+    '''store all non-opaque points and shuffle'''
+    ret = {}  
+    num_samples_per_image = []
+    samples = {}
+    saliency_maps_list = []
+    rgb_list = []
+    for i in tqdm(range(num_img)):
+        cur_time = i
+        #flow_time = int(np.floor(cur_time))
+        #ratio = cur_time - np.floor(cur_time)
+        #print('cur_time ', i, cur_time, ratio)
+        #t = time.time()
+
+        #int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+        #                                        render_poses[flow_time, :3, :3],
+        #                                        render_poses[flow_time + 1, :3, 3], 
+        #                                        render_poses[flow_time + 1, :3, :3], 
+        #                                        ratio)
+        int_rot = render_poses[cur_time, :3, :3]
+        int_trans = render_poses[cur_time, :3, 3]
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        img_idx_embed = cur_time/float(num_img) * 2. - 1.0
+        #img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        for key in ret:
+            ret[key] = ret[key].cuda()
+        num_sample = ret['raw_rgb'].shape[2]
+        
+        tmp["T_i"] = torch.ones((1, H, W)).permute(1, 2, 0)
+        tmp["z_vals"] = ret["z_vals"]
+        tmp["final_depth"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_dino"] = torch.zeros((ret["raw_dino"].shape[-1], H, W)).permute(1, 2, 0)
+        tmp["final_blend"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_sal"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_rgb"] = torch.zeros((H, W, 3))
+        for j in tqdm(range(0, num_sample)):
+            #assert False, [ret["raw_alpha"].shape, ret["raw_dino"].shape]
+            tmp["final_rgb"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_rgb"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_rgb_rigid"][..., j, :]
+            )
+            tmp["final_dino"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_dino"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_dino_rigid"][..., j, :]
+            )
+            tmp["final_sal"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_sal"][..., j, :] + 
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_sal_rigid"][..., j, :]
+            )
+            tmp["final_blend"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None]
+            )
+            tmp["alpha_final"] = 1.0 - \
+                (1.0 - ret["raw_alpha"][..., j, None]) * \
+                (1.0 - ret["raw_alpha_rigid"][..., j, None])
+            #assert False, tmp["z_vals"].shape
+            tmp["final_depth"] += tmp["T_i"] * tmp["alpha_final"] * tmp["z_vals"][..., j, None].cuda()
+            tmp["T_i"] = tmp["T_i"] * (1.0 - tmp["alpha_final"] + 1e-10)
+        
+        # visualize dino image
+        pca = PCA(n_components=3).fit(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
+        pca_feats = pca.transform(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
+        pca_feats = pca_feats.reshape((tmp["final_dino"].shape[0], tmp["final_dino"].shape[1], pca_feats.shape[-1]))
+        for comp_idx in range(3):
+            comp = pca_feats[:, :, comp_idx]
+            comp_min = comp.min(axis=(0, 1))
+            comp_max = comp.max(axis=(0, 1))
+            comp_img = (comp - comp_min) / (comp_max - comp_min)
+            pca_feats[..., comp_idx] = comp_img
+        cv2.imwrite("test.png", pca_feats * 255.)
+        
+        assert False, "Pause"
+        
+        # blur saliency
+        #tmp["final_sal"] = torch.nn.functional.interpolate(kornia.filters.blur_pool2d(tmp["final_sal"][None, ...].permute(0, 3, 1, 2), 3), (tmp["final_blend"].shape[0], tmp["final_blend"].shape[1]))[0].permute(1,2, 0)
+        #assert False, [tmp["final_blend"].shape, tmp["final_sal"].shape]
+        th = 0.1
+        th = torch.quantile(torch.unique(tmp["final_sal"]), 0.9)
+        th2 = torch.quantile(torch.unique(tmp["final_blend"]), 1)
+        th3 = torch.quantile(torch.unique(tmp["final_sal"]), 0.)
+        result = tmp["final_blend"]*(((tmp["final_sal"]>th) | (tmp["final_blend"] > th2)) & (tmp["final_sal"]>th3))
+        result = tmp["final_blend"]
+        th4 = torch.quantile(torch.unique(tmp["final_sal"]), 0.5)
+        th4 = 0.05
+        result[tmp["final_sal"] < th4] = 0 
+        #result = torch.nn.functional.interpolate(kornia.filters.gaussian_blur2d(result[None, ...].permute(0, 3, 1, 2), (3,3), (1.5, 1.5)), (tmp["final_blend"].shape[0], tmp["final_blend"].shape[1]))[0].permute(1,2, 0)
+        #cv2.imwrite("test.png", result.cpu().numpy()*255.)
+        #assert False, th4
+        #saliency_map = result
+        #assert False, [ret["rays_o"][...,None,:].shape, tmp["final_depth"].shape, tmp["final_depth"].permute(1, 2, 0)[..., None].shape]
+        tmp["points"] = ret["rays_o"] + ret["rays_d"] * tmp["final_depth"]
+        tmp["times"] = torch.ones_like(tmp["final_sal"]) * img_idx_embed
+        
+        num_samples_per_image.append(tmp["times"].shape[0] * tmp["times"].shape[1])
+        
+        if i == 0:
+            samples["dinos"] = tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1])
+            samples["sals"] = tmp["final_sal"].view(-1, 1)
+            samples["points"] = tmp["points"].view(-1, 3)
+            samples["times"] = tmp["times"].view(-1, 1)
+        else:
+            samples["dinos"] = torch.cat([samples["dinos"], tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1])], dim=0)
+            samples["sals"] = torch.cat([samples["sals"], tmp["final_sal"].view(-1, 1)], dim=0)
+            samples["points"] = torch.cat([samples["points"], tmp["points"].view(-1, 3)], dim=0)
+            samples["times"] = torch.cat([samples["times"], tmp["times"].view(-1, 1)], dim=0)
+        saliency_maps_list.append(result.view(-1, 1))
+        rgb_list.append(tmp["final_rgb"])
+        for key in tmp:
+            tmp[key] = None
+        for key in ret:
+            ret[key] = None
+        torch.cuda.empty_cache()
+    feature = torch.cat([
+        torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight,
+        torch.nn.functional.normalize(torch.cat([samples["points"]], dim=-1), dim=-1),
+        #samples["times"],
+    ], dim=-1).cpu().numpy().astype(np.float32)
+    #sampled_feature = np.ascontiguousarray(feature[::sample_interval])
+    #sampled_feature = feature[torch.cat(saliency_maps_list, dim=0).view(-1).cpu().numpy() > 0, :]
+    is_bg_coords = torch.cat(saliency_maps_list, dim=0).view(-1).cpu().numpy() <= 0
+    #fg_ratio = np.sum(is_bg_coords) / float(len(feature))
+    #assert False, fg_ratio
+    print(np.sum(is_bg_coords) / float(len(feature)))
+    fg_ratio = 0.5
+    #fg_ratio = 1- np.sum(is_bg_coords) / float(len(feature))
+    fg_indices = np.random.choice(np.sum(~is_bg_coords), size=min(np.sum(~is_bg_coords), int(feature.shape[0]//sample_interval * fg_ratio)), replace=False)
+    bg_indices = np.random.choice(np.sum(is_bg_coords), size=min(np.sum(is_bg_coords), int(len(fg_indices)*(1.-fg_ratio)/fg_ratio)) , replace=False)
+    sampled_feature = np.concatenate([
+        feature[~is_bg_coords, :][fg_indices],
+        feature[is_bg_coords, :][bg_indices]
+        ], axis=0)
+    #print(f"{np.sum(~is_bg_coords)} foreground samples, {sampled_feature.shape[0] - np.sum(~is_bg_coords)} background samples")
+    #sampled_feature = feature[indices]
+    #assert False, [feature.shape[0]//sample_interval, sampled_feature.shape, np.sum(is_bg_coords), np.sum(~is_bg_coords), feature.shape[0]//sample_interval - np.sum(~is_bg_coords)]
+    sum_of_squared_dists = []
+    n_cluster_range = list(range(1, n_cluster))
+    for n_clu in tqdm(n_cluster_range):
+        algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+        algorithm.train(sampled_feature)
+        squared_distances, labels = algorithm.index.search(feature, 1)
+        objective = squared_distances.sum()
+        sum_of_squared_dists.append(objective / feature.shape[0])
+        if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):    
+            break
+    faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "large.index")) 
+    num_labels = np.max(n_clu) + 1
+    labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+    
+    votes = np.zeros(num_labels)
+    for image_labels, saliency_map in zip(labels_per_image, saliency_maps_list):
+        for label in range(num_labels):
+            label_saliency = saliency_map[image_labels[:, 0] == label].mean()
+            if label_saliency > thresh:
+                votes[label] += 1
+    print(votes)
+    salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
+    with open(os.path.join(savedir, "salient.npy"), "wb") as f:
+        np.save(f, salient_labels)
+    
+
+    
+    
+    
+    
+    # merge clusters
+    # note: do it backwards! Let former clusters overwrite latter clusters
+    
+    centroids = algorithm.centroids
+    sims = -np.ones((len(centroids), len(centroids)))
+    assert samples["dinos"].shape[-1] == 64
+    for c1 in range(len(centroids)):
+        item_1 = centroids[c1][:64]
+        for c2 in range(c1+1, len(centroids)):
+            item_2 = centroids[c2][:64]
+            sims[c1, c2] = np.dot(item_1, item_2) / (np.linalg.norm(item_1) * np.linalg.norm(item_2))
+            print(c1, c2, sims[c1, c2])
+    label_mapper = {} 
+    print(salient_labels)       
+    for c2 in range(len(centroids)):
+        if not np.any(salient_labels[0]==c2):
+            continue
+        for c1 in range(c2):
+            if not np.any(salient_labels[0]==c1):
+                continue
+            if sims[c1, c2] > similarity_thresh:
+                label_mapper[c2] = c1
+                break    
+    pickle.dump(label_mapper, open(os.path.join(savedir, "label_mapper.pkl"), 'wb'))
+    #assert False
+    #print(np.unique(labels))
+    for key in label_mapper:
+        print(key, label_mapper[key])
+    old_labels_per_image = copy.deepcopy(labels_per_image)
+    for c1 in range(len(centroids)):
+        key = len(centroids) - c1 - 1
+        if key in label_mapper:
+            labels[labels == key] = label_mapper[key]
+    #assert False, [np.unique(labels), label_mapper]
+    
+
+    labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+    for idx, (rgb, image_labels, old_image_labels) in enumerate(zip(rgb_list, labels_per_image, old_labels_per_image)):
+        img_clu = -np.ones_like(image_labels).astype(int)
+        img_clu[np.isin(image_labels, salient_labels)] = image_labels[np.isin(image_labels, salient_labels)]
+        img_clu = d3_41_colors_rgb[img_clu.reshape((rgb.shape[0], rgb.shape[1]))]
+        img_bld = 0.5*rgb.cpu().numpy()[..., [2, 1, 0]]*255. + 0.5 * img_clu
+        img_bld[img_bld > 255.] = 255.
+        cv2.imwrite(os.path.join(savedir, f"{idx}_clu.png"),img_clu)
+        cv2.imwrite(os.path.join(savedir, f"{idx}_bld.png"),img_bld )
+        img_clu = d3_41_colors_rgb[image_labels.reshape((rgb.shape[0], rgb.shape[1]))]
+        img_bld = 0.5*rgb.cpu().numpy()[..., [2, 1, 0]]*255. + 0.5 * img_clu
+        img_bld[img_bld > 255.] = 255.
+        cv2.imwrite(os.path.join(savedir, f"{idx}_clu_full.png"),img_clu)
+        cv2.imwrite(os.path.join(savedir, f"{idx}_bld_full.png"),img_bld )
+        
+        img_clu = d3_41_colors_rgb[old_image_labels.reshape((rgb.shape[0], rgb.shape[1]))]
+        img_bld = 0.5*rgb.cpu().numpy()[..., [2, 1, 0]]*255. + 0.5 * img_clu
+        img_bld[img_bld > 255.] = 255.
+        cv2.imwrite(os.path.join(savedir, f"{idx}_clu_full_beforemerge.png"),img_clu)
+        cv2.imwrite(os.path.join(savedir, f"{idx}_bld_full_beforemerge.png"),img_bld )
+    
+    
+    assert False, "Pause"
+
+
+
+def cluster_finch(render_poses, 
+                     hwf, chunk, render_kwargs, 
+                     dino_weight,
+                     flow_weight,
+                     savedir=None, 
+                     render_factor=0, 
+                     alpha_threshold=0.2,
+                     sample_interval=20,
+                     n_cluster=10,
+                     thresh=0.01,
+                     votes_percentage=75):
+    # import scipy.io
+    torch.manual_seed(0)
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    #save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    #save_cls_dir = os.path.join(savedir, 'cls')
+    os.makedirs(savedir, exist_ok=True)
+    #os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None,
+        "dinos": None,
+        "sals": None
+    }
+    
+
+    samples = {
+        "dinos": None,
+        "times": None,
+        "sals": None,
+        "points": None
+
+    }
+
+    num_img = render_poses.shape[0]    
+    num_img = 2
+    
+    '''store all non-opaque points and shuffle'''
+    ret = {}  
+    num_samples_per_image = []
+    for i in tqdm(range(num_img)):
+        cur_time = i
+        #flow_time = int(np.floor(cur_time))
+        #ratio = cur_time - np.floor(cur_time)
+        #print('cur_time ', i, cur_time, ratio)
+        #t = time.time()
+
+        #int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+        #                                        render_poses[flow_time, :3, :3],
+        #                                        render_poses[flow_time + 1, :3, 3], 
+        #                                        render_poses[flow_time + 1, :3, :3], 
+        #                                        ratio)
+        int_rot = render_poses[cur_time, :3, :3]
+        int_trans = render_poses[cur_time, :3, 3]
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        img_idx_embed = cur_time/float(num_img) * 2. - 1.0
+        #img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        num_sample = ret['raw_rgb'].shape[2]
+        
+
+        # get opaque filter to only remain non-empty space points
+        opaque = 1. - (1. - ret["raw_alpha"])*(1. - ret["raw_alpha_rigid"]) 
+        opaque = opaque > alpha_threshold
+        tmp["dy"] = ret["raw_alpha"]/(ret["raw_alpha"] + ret["raw_alpha_rigid"])
+        #opaque = opaque & (tmp["dy"] > 0.5)
+
+        #tmp["dinos"] = tmp["dinos"][opaque, :]
+        #tmp["sals"] = tmp["sals"][opaque, :]
+        #tmp["points"] = tmp["sals"][opaque, :]
+        # get each sample's dino feature
+        #assert False, [opaque.shape, opaque.device, ret["raw_alpha"][opaque].shape, ret["raw_dino"][opaque, :].shape]
+        tmp["colors"] = ret["raw_alpha"][opaque][..., None] * ret["raw_rgb"][opaque, :] + ret["raw_alpha_rigid"][opaque][..., None] * ret["raw_rgb_rigid"][opaque, :]
+        tmp["colors"] /= (ret["raw_alpha"][opaque][..., None]+ret["raw_alpha_rigid"][opaque][..., None])
+        
+        tmp["dinos"] = ret["raw_alpha"][opaque][..., None].cuda() * ret["raw_dino"][opaque, :] + ret["raw_alpha_rigid"][opaque][..., None].cuda() * ret["raw_dino_rigid"][opaque, :]
+        tmp["dinos"] /= (ret["raw_alpha"][opaque][..., None].cuda()+ret["raw_alpha_rigid"][opaque][..., None].cuda())
+        # get each sample's saliency information
+        tmp["sals"] = ret["raw_alpha"][opaque][..., None] * ret["raw_sal"][opaque, :]  + ret["raw_alpha_rigid"][opaque][..., None] * ret["raw_sal_rigid"][opaque, :] 
+        tmp["sals"] /= (ret["raw_alpha"][opaque][..., None]+ret["raw_alpha_rigid"][opaque][..., None])
+        # get each sample's 3D position in ndc space
+        #tmp["z_vals"] = 
+        #assert False, [ret["rays_o"][None, :].shape]
+        #assert False, [ret["rays_o"][:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :].shape]
+        tmp["points"] = ret["rays_o"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] + ret["rays_d"].cpu()[:, :, None, :].repeat(1, 1, opaque.shape[-1], 1)[opaque, :] * \
+                        ret["z_vals"][opaque][:, None]
+        #tmp["points"] = ret['rays_o'][opaque,None,:] + ret['rays_d'][opaque,None,:]* (ret['z_vals'][opaque,:,None])
+        tmp["dy"] = tmp["dy"][opaque][:, None]
+        tmp["sf_prev"] = ret["raw_sf_ref2prev"][opaque]
+        tmp["sf_post"] = ret["raw_sf_ref2post"][opaque]               
+
+        # shuffle the points before selection
+        indices = torch.randperm(tmp["dinos"].size()[0])
+        tmp["colors"] = tmp["colors"][indices, :]
+        tmp["dinos"] = tmp["dinos"][indices.cuda(), :]
+        tmp["sals"] = tmp["sals"][indices, :]
+        tmp["points"] = tmp["points"][indices, :]
+        tmp["dy"] = tmp["dy"][indices, :]
+        tmp["sf_prev"] = tmp["sf_prev"][indices, :]
+        tmp["sf_post"] = tmp["sf_post"][indices, :]
+
+        # select sample points for cluster at this time step
+        if i == 0:
+            samples["times"] = torch.ones_like(tmp["sals"])[::sample_interval, :] * img_idx_embed
+            samples["dinos"] = tmp["dinos"][::sample_interval, :].cpu()
+            samples["sals"] = tmp["sals"][::sample_interval, :]
+            samples["points"] = tmp["points"][::sample_interval, :]
+            samples["dy"] = tmp["dy"][::sample_interval, :]
+            samples["colors"] = tmp["colors"][::sample_interval, :]
+            samples["sf_prev"] = tmp["sf_prev"][::sample_interval, :]
+            samples["sf_post"] = tmp["sf_post"][::sample_interval, :]
+            num_samples_per_image.append(samples["times"].shape[0])
+        else:
+            
+            samples["times"] = torch.cat((samples["times"], torch.ones_like(tmp["sals"])[::sample_interval, :] * img_idx_embed), dim=0)
+            samples["dinos"] = torch.cat((samples["dinos"], tmp["dinos"][::sample_interval, :].cpu()), dim=0)
+            samples["sals"] = torch.cat((samples["sals"], tmp["sals"][::sample_interval, :]), dim=0)
+            samples["points"] = torch.cat((samples["points"], tmp["points"][::sample_interval, :]), dim=0)
+            samples["dy"] = torch.cat((samples["dy"], tmp["dy"][::sample_interval, :]), dim=0)
+            samples["colors"] = torch.cat((samples["colors"], tmp["colors"][::sample_interval, :]), dim=0)
+            samples["sf_prev"] = torch.cat((samples["sf_prev"], tmp["sf_prev"][::sample_interval, :]), dim=0)
+            samples["sf_post"] = torch.cat((samples["sf_post"], tmp["sf_post"][::sample_interval, :]), dim=0)
+            num_samples_per_image.append(samples["times"].shape[0])
+        for key in tmp:
+            tmp[key] = None
+        for key in ret:
+            ret[key] = None
+        torch.cuda.empty_cache()
+            
+    
+        
+    ## not working!!! as dino values are too far away from normalized!   
+    # normalize each domain so that they first fall between -1 and 1, then is divided by their dimension
+    # this is the way used in vanilla transformer
+    #samples["dinos"] /= math.sqrt(samples["dinos"].shape[-1])
+    
+    #normed = 
+    #torch.save(samples["dinos"] / normed, os.path.join(savedir, "dino_normalizer.pt") )
+    #samples["dinos"] = normed
+
+    #samples["sals"] = 2.*samples["sals"] - 1.
+    # points are roughly between -1 and 1; no modification for now
+    #assert False, [torch.max(samples["points"][:, 0]), torch.min(samples["points"][:, 0]),
+    #               torch.max(samples["points"][:, 1]), torch.min(samples["points"][:, 1]),
+    #            torch.max(samples["points"][:, 2]), torch.min(samples["points"][:, 2]),]
+    #samples["points"] /= math.sqrt(samples["points"].shape[-1])
+    #normed = 
+    #torch.save(samples["points"] / normed, os.path.join(savedir, "point_normalizer.pt") )
+    #samples["points"] = normed
+    
+    #assert False, samples["dinos"].shape
+    #assert False, [(k, samples[k].shape) for k in samples]
+    feature = torch.cat([
+        torch.nn.functional.normalize(samples["colors"], dim=-1),
+        torch.nn.functional.normalize(samples["dinos"], dim=-1)*dino_weight, 
+     #   samples["sals"],
+        samples["dy"],
+        torch.nn.functional.normalize(samples["sf_prev"], dim=-1) * flow_weight,
+        torch.nn.functional.normalize(samples["sf_post"], dim=-1) * flow_weight,
+        torch.nn.functional.normalize(samples["points"], dim=-1),
+        samples["times"],],
+        dim=-1).numpy()
+    #ngpus = faiss.get_num_gpus()
+    #assert False, ngpus
+    
+    print(f"start clustering on {len(feature)} points...")
+    
+    
+    finch = FINCH()
+    labels = finch.fit_predict(feature)
+    assert False, labels.shape
+    #faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "large.index")) 
+    #_, labels = algorithm.index.search(feature, 1)
+    #index = algorithm.index
+
+    # sklearn spectralclustering
+    # not working as too big an array
+    #clustering = SpectralClustering(n_clusters=n_cluster,
+    #assign_labels="discretize",
+    #random_state=0).fit(feature)
+    
+    # DBSCAN
+    #clustering = DBSCAN(eps=0.5, min_samples=5, n_jobs=4).fit(feature)
+    #labels = clustering.labels_[:, None]
+    #pickle.dump(finch, open(os.path.join(savedir, "large.pkl"), "wb"))
+    #n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+    #assert False, [n_clusters_, labels.shape]
+    
+    labels_per_image = np.split(labels, num_samples_per_image)[:num_img]
+    #assert False, num_samples_per_image
+    #assert False, [len(labels_per_image), [label_per_image.shape for label_per_image in labels_per_image]]
+    saliency_maps_list = np.split(samples["dy"], num_samples_per_image)[:num_img]
+    points_list = np.split(samples["points"], num_samples_per_image)[:num_img]
+    
+    votes = np.zeros(n_cluster)
+    for image_labels, saliency_map in zip(labels_per_image, saliency_maps_list):
+        for label in range(n_cluster):
+            #votes[label] += 1
+            #continue
+            if np.any(image_labels[:, 0] == label):
+                label_saliency = (saliency_map[image_labels[:, 0] == label]).mean()
+            else:
+                label_saliency = 0
+            print(label, label_saliency)
+            if label_saliency > thresh:
+                votes[label] += 1
+    #assert False, votes
+    salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
+    
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points_list[0].view(-1, 3).numpy())
+    pcd.colors = o3d.utility.Vector3dVector(labels_per_image[0].view(-1, 1).repeat(1, 3).cpu().numpy())
+    o3d.io.write_point_cloud(os.path.join(savedir, '{:03d}.ply'.format(0)), pcd)
+    assert False
+    #salient_labels = np.unique(labels)
+    #with open(os.path.join(savedir, "saliency.npy"), "wb") as f:
+    #    np.save(f, salient_labels) 
+    #assert False, [np.unique(labels), salient_labels]
+    #print(index.search(feature[:3], 1))
+    '''
+    input()
+    
+    # for now clustering version is slower?
+    algorithm = faiss.Clustering(
+        feature.shape[-1], 
+        n_cluster, 
+        )
+    algorithm.niter=300 
+    algorithm.nredo=10
+    algorithm.seed=1234 
+    algorithm.verbose=True
+    res = faiss.StandardGpuResources()
+    flat_config = faiss.GpuIndexFlatConfig()
+    flat_config.device = 0
+    flat_config.useFloat16 = False
+    index = faiss.GpuIndexFlatL2(res, feature.shape[-1], flat_config)
+    algorithm.train(feature, index) 
+    '''
+    #centroids = np.load(args.load_algo)
+    #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+    #algorithm.centroids = centroids
+    #
+    return 
+    
 
 
 def render_lockcam_slowmo(ref_c2w, num_img, 
@@ -1113,7 +2428,7 @@ def batchify_rays_sm(img_idx, chain_bwd, chain_5frames,
     return all_ret
 
 
-def raw2rgba_blend_slowmo(raw_dino, raw, raw_blend_w, z_vals, rays_d, raw_noise_std=0):
+def raw2rgba_blend_slowmo(raw_sal, raw_dino, raw, raw_blend_w, z_vals, rays_d, raw_noise_std=0):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw_dino: [num_rays, num_samples along ray, dino_ch]. Prediction from model.
@@ -1143,7 +2458,7 @@ def raw2rgba_blend_slowmo(raw_dino, raw, raw_blend_w, z_vals, rays_d, raw_noise_
 
     alpha = raw2alpha(raw[...,3] + noise, dists) * raw_blend_w  # [N_rays, N_samples]
 
-    return raw_dino, rgb, alpha
+    return raw_sal, raw_dino, rgb, alpha
 
 
 @torch.no_grad()
@@ -1197,7 +2512,6 @@ def render_rays_sm(img_idx,
       z_std: [num_rays]. Standard deviation of distances along ray for each
         sample.
     """
-    assert False, "not debugged for saliency!"
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
@@ -1238,7 +2552,7 @@ def render_rays_sm(img_idx,
     #print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
     #print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
     with torch.no_grad():
-        dino_map_rig, rgb_map_rig, depth_map_rig, raw_dino_rigid, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
+        sal_map_rig, dino_map_rig, rgb_map_rig, depth_map_rig, raw_sal_rigid, raw_dino_rigid, raw_rgba_rigid, raw_blend_w = get_rigid_outputs(pts_ref, viewdirs, 
                                                                                rigid_network_query_fn, 
                                                                                network_rigid, 
                                                                                z_vals, rays_d, 
@@ -1257,26 +2571,28 @@ def render_rays_sm(img_idx,
     
     # query point at time t
     raw_ref = network_query_fn(pts_ref, viewdirs, network_fn)
-    if dino_map_rig is None:
-        dino_ch = 0
-    else:
+    dino_ch = 0
+    sal_ch = 0
+    if dino_map_rig is not None:
         dino_ch = dino_map_rig.shape[-1]
+        if sal_map_rig is not None:
+            sal_ch = 1
     raw_rgba_ref = raw_ref[:, :, :4]
     
-    #raw_dino_ref = None
-    
+    raw_dino_ref = None
+    raw_sal_ref = None
     if dino_ch > 0:
         raw_dino_ref = raw_ref[:, :, 4:4+dino_ch]
-    else:
-        raw_dino_ref = None
+        if sal_ch > 0:
+            raw_sal_ref = raw_ref[:, :, 4+dino_ch:5+dino_ch]
     
-    raw_sf_ref2prev = raw_ref[:, :, 4+dino_ch:7+dino_ch]
-    raw_sf_ref2post = raw_ref[:, :, 7+dino_ch:10+dino_ch]
+    raw_sf_ref2prev = raw_ref[:, :, 4+dino_ch+sal_ch:7+dino_ch+sal_ch]
+    raw_sf_ref2post = raw_ref[:, :, 7+dino_ch+sal_ch:10+dino_ch+sal_ch]
     # raw_blend_w_ref = raw_ref[:, :, 12]
 
-    raw_dino, raw_rgb, raw_alpha = raw2rgba_blend_slowmo(raw_dino_ref, raw_rgba_ref, raw_blend_w, 
+    raw_sal, raw_dino, raw_rgb, raw_alpha = raw2rgba_blend_slowmo(raw_sal_ref, raw_dino_ref, raw_rgba_ref, raw_blend_w, 
                                             z_vals, rays_d, raw_noise_std)
-    raw_dino_rigid, raw_rgb_rigid, raw_alpha_rigid = raw2rgba_blend_slowmo(raw_dino_rigid, raw_rgba_rigid, (1. - raw_blend_w), 
+    raw_sal_rigid, raw_dino_rigid, raw_rgb_rigid, raw_alpha_rigid = raw2rgba_blend_slowmo(raw_sal_rigid, raw_dino_rigid, raw_rgba_rigid, (1. - raw_blend_w), 
                                                             z_vals, rays_d, raw_noise_std)
 
     
@@ -1309,6 +2625,8 @@ def render_rays_sm(img_idx,
         #    ret[k] = ret[k].cpu()
         ret['raw_dino'] = raw_dino
         ret['raw_dino_rigid'] = raw_dino_rigid
+        ret['raw_sal'] = raw_sal
+        ret['raw_sal_rigid'] = raw_sal_rigid
     else:
         for k in ret:
             ret[k] = ret[k].cpu()

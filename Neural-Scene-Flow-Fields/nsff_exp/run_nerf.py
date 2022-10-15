@@ -17,7 +17,8 @@ from load_llff import *
 sys.path.append("../../dino_utils")
 from extractor import *
 from cosegmentation import *
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, IncrementalPCA
+import pickle
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -47,8 +48,19 @@ def config_parser():
                         help="render colored point cloud")
     parser.add_argument("--render_pcd_cluster", action="store_true",
                         help="render clustered point cloud")
+    parser.add_argument("--render_pcd_cluster_3D", action="store_true",
+                        help="render clustered point cloud in 3D")
+    parser.add_argument("--render_sal_3D", action="store_true",
+                        help="render saliency in 3D")
+    parser.add_argument("--cluster_pcd", action="store_true",
+                        help="cluster point cloud in 3D ")
+    parser.add_argument("--cluster_2D", action="store_true",
+                        help="cluster on 2D rendered result ")
+    parser.add_argument("--cluster_finch", action="store_true", help="cluster point cloud in 3D finch")
     parser.add_argument("--load_algo", type=str,
                         help="clustering algorithm to use")
+    parser.add_argument("--n_cluster", type=int,
+                        help="how many clusters to use")
 
 
     parser.add_argument("--final_height", type=int, default=288, 
@@ -197,6 +209,14 @@ def config_parser():
                         help="use tanh as in D3F")  
     parser.add_argument("--n_components", default=64, type=int, help="pca components")  
     
+    
+    parser.add_argument("--dino_weight", default=1, type=float, help="dino feature importance")  
+    parser.add_argument("--flow_weight", default=0, type=float, help="flow feature importance")  
+
+    
+    #args.use_multi_dino
+    parser.add_argument("--use_multi_dino", action="store_true", help="whether use multi-resolution dino")  
+
     return parser
 
 
@@ -221,10 +241,125 @@ def train():
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
         
-        if args.dino_coe > 0:
+        if args.use_multi_dino:
+            # a version of multiresolution
+            assert args.dino_coe >0, "has to make sure dino is being used"
+            assert args.prep_dino, "Has to make sure dim is small enough other wise explode cpu/gpu"
+            assert args.sal_coe >0, "has to make sure saliency is smooth as well"
+            extractor = ViTExtractor(args.model_type, args.stride, device=device)
+            saliency_extractor = extractor
+            
+            # first calculate all bbox for each image to compute
+            # then as in the old time, group into batch
+            start = 0
+            N_samples = [0, 0.5, 1]
+            coords = []
+            height, width = images.shape[1], images.shape[2]
+            if height < width:
+                dwidth = int(args.load_dino_size / float(height) * width)
+                dheight = args.load_size
+            else:
+                dheight = int(args.load_dino_size / float(width) * height)
+                dwidth = args.load_size
+            
+            # for each image
+            while start < images.shape[0]:
+                #coords = []
+                for N_sample in N_samples:
+                    if N_sample == 0:
+                        coords.append([start, 0, 0, images[0].shape[0], images[0].shape[1]])
+                    else:
+                        height_size = int(dheight // N_sample)
+                        width_size = int(dwidth // N_sample)                        
+                        height_step = height_size // 2
+                        width_step = width_size // 2
+                        start_height = 0
+                        while start_height < height - height_size:
+                            start_width = 0
+                            while start_width < width - width_size:
+                                coords.append([start, start_height, start_width, start_height + height_size, start_width + width_size])
+                                if start_width == width-width_size -1:
+                                    break
+                                start_width = min(width-width_size-1, start_width + width_step)
+                            if start_height == height-height_size - 1:
+                                break
+                            start_height = min(height - height_size-1, start_height + height_step)
+                start += 1
+                #coordss.append(coords)
+            #print(coords)
+            #assert False, coords
+            start = None
+            
+            
+            feats = None
+            #torch.zeros((len(images), images[0].shape[0], images[0].shape[1], args.n_components))
+            counter = torch.zeros((len(images), images[0].shape[0], images[0].shape[1], 1))     
+            sals = torch.zeros((len(images), images[0].shape[0], images[0].shape[1], 1))            
+            for [image_id, start_height, start_width, end_height, end_width] in tqdm(coords):
+                batch = images[image_id:image_id+1, start_height:end_height, start_width:end_width]
+                batch = torch.tensor(batch).permute(0, 3, 1, 2)
+                batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
+                with torch.no_grad():
+                    feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
+                    feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    feat_raw = F.interpolate(feat_raw, size=(end_height - start_height, end_width - start_width), mode='nearest')
+                    if feats is None:
+                        feats = torch.zeros((len(images), images[0].shape[0], images[0].shape[1], feat_raw.shape[1]))
+                    #assert False, [feats.shape, feat_raw.shape]
+                    feats[image_id:image_id+1, start_height:end_height, start_width:end_width] += feat_raw.permute(0, 2, 3, 1)
+                    counter[image_id:image_id+1, start_height:end_height, start_width:end_width] += 1
+                    sal_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
+                    sal_raw = sal_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    sal_raw = F.interpolate(sal_raw, size=(end_height - start_height, end_width - start_width), mode='nearest')
+                    sals[image_id:image_id+1, start_height:end_height, start_width:end_width] += sal_raw.permute(0, 2, 3, 1)
+                   
+            feats /= 1e-16 + counter
+            sals /= 1e-16 + counter
+            
+            feats = F.normalize(feats, p=2, eps=1e-12, dim=-1).cpu()
+            counter = None
+            sals = sals.cpu()
+
+            #print("I am done")
+            pca = PCA(n_components=args.n_components).fit(feats.view(-1, feats.shape[-1])[::100])
+            #print("I am done")
+            #print("I am done")
+            split_idxs = np.array([images.shape[1] * images.shape[2] for _ in range(images.shape[0])])
+            split_idxs = np.cumsum(split_idxs)
+            feats = np.split(feats.view(-1, feats.shape[-1]).numpy(), split_idxs[:-1], axis=0)
+            #print("I am done")
+            feats = [pca.transform(feat) for feat in feats]
+            feats = torch.from_numpy(np.concatenate(feats, axis=0)).view(images.shape[0], images.shape[1], images.shape[2], -1)
+            #assert False, [len(num_patches_list), pca_feats.shape]
+            
+            '''
+            #print("I am done")
+            # visualize in PCA           
+            pca = PCA(n_components=3).fit(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca.transform(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca_feats.reshape((images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
+            for comp_idx in range(3):
+                comp = pca_feats[:, :, comp_idx]
+                comp_min = comp.min(axis=(0, 1))
+                comp_max = comp.max(axis=(0, 1))
+                comp_img = (comp - comp_min) / (comp_max - comp_min)
+                pca_feats[..., comp_idx] = comp_img
+            cv2.imwrite("test_gt.png", pca_feats * 255.)
+            cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
+            assert False
+            '''
+            print("Loaded dino features ", feats.shape)
+            start = None
+            pca = None
+
+        elif args.dino_coe > 0:
             extractor = ViTExtractor(args.model_type, args.stride, device=device)
             if args.sal_coe > 0:
                 saliency_extractor = extractor
+            
+            
             # have to do this in batch otherwise blows the gpu
             start = 0
             feats = None
@@ -284,11 +419,27 @@ def train():
                 split_idxs = np.cumsum(split_idxs)
                 pca_per_image = np.split(pca_feats, split_idxs[:-1], axis=0)
                 feats = torch.from_numpy(np.stack(pca_per_image, axis=0)).view(old_shape[0], old_shape[1], old_shape[2], -1)
-                #assert False, [len(pca_per_image), pca_per_image[0].shape, feats.shape]
+                '''
+                # visualize in PCA
+                feats = torch.nn.functional.interpolate(feats.permute(0, 3, 1, 2), (images[0].shape[0], images[0].shape[1]), mode=
+                'nearest').permute(0, 2,3 ,1)
+                assert False, feats.shape
+                pca = PCA(n_components=3).fit(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+                pca_feats = pca.transform(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+                pca_feats = pca_feats.reshape((images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
+                for comp_idx in range(3):
+                    comp = pca_feats[:, :, comp_idx]
+                    comp_min = comp.min(axis=(0, 1))
+                    comp_max = comp.max(axis=(0, 1))
+                    comp_img = (comp - comp_min) / (comp_max - comp_min)
+                    pca_feats[..., comp_idx] = comp_img
+                cv2.imwrite("test_gt.png", pca_feats * 255.)
+                assert False, "Pause"
                 #assert False, "Debugging! not finished at all; model architecture unchanged for example; better to preprocess before training"
-                
+                '''
             print("Loaded dino features ", feats.shape)
             start = None
+            
         
         i_test = []
         i_val = [] #i_test
@@ -435,7 +586,7 @@ def train():
 
         return
     if args.render_pcd_color:
-        assert False, "axis may be wrong due to saliency channel!!!"
+        #assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER pcd color')
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
@@ -457,7 +608,7 @@ def train():
         return
     
     if args.render_pcd_cluster:
-        assert False, "axis may be wrong due to saliency channel!!!"
+        #assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER pcd cluster')
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
@@ -469,22 +620,277 @@ def train():
                                 target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
         #assert False, testsavedir
         os.makedirs(testsavedir, exist_ok=True)
-        assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
-        n_clusters = int(args.load_algo.split("/")[-1].split("_")[1])
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #n_clusters = int(args.load_algo.split("/")[-1].split("_")[1])
         #assert False, [load_algo, n_clusters]
         #assert False, feats[0].shape
-        algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=n_clusters, niter=300, nredo=10)
-        centroids = np.load(args.load_algo)
-        sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
-        algorithm.centroids = centroids
-        algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
-        assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
-        salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=n_clusters, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        res = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index("./logs/experiment_Jumping_sal_F00-30/cluster_pcd-010_path_360001/large.index"))
+        salient_labels = np.load("./logs/experiment_Jumping_sal_F00-30/cluster_pcd-010_path_360001/saliency.npy")
+        
+        render_kwargs_test["N_samples"] = 64
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            render_pcd_cluster(index, salient_labels, render_poses, bt_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            gt_imgs=images, savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            target_idx=10)
+        return
+    if args.cluster_pcd:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('cluster in 3D')
+        assert args.use_tanh, "Need to make sure dino feature falls in between -1 and 1"
+        assert (args.dino_coe > 0) and (args.sal_coe > 0), "must have both dino head and saliency head"
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        #assert False, render_poses.shape
+        #bt_poses = create_bt_poses(hwf) 
+        #bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'cluster_pcd-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=args.n_cluster, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        #salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
         
             
         with torch.no_grad():
             #assert False, "parameters not decided!"
-            render_pcd_cluster(algorithm, centroids, salient_labels, render_poses, bt_poses, 
+            res = faiss.StandardGpuResources()
+            try:
+                index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+                salient_labels = np.load(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "saliency.npy"))
+            except:
+                index = None
+                salient_labels = None
+            cluster_pcd(render_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            dino_weight=args.dino_weight,
+                            flow_weight=args.flow_weight,
+                            index = index,
+                            salient_labels = salient_labels,
+                            savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            )
+        return
+    if args.cluster_2D:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('cluster in 2D')
+        assert args.use_tanh, "Need to make sure dino feature falls in between -1 and 1"
+        assert (args.dino_coe > 0) and (args.sal_coe > 0), "must have both dino head and saliency head"
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        #assert False, render_poses.shape
+        #bt_poses = create_bt_poses(hwf) 
+        #bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'cluster_2D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=args.n_cluster, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        #salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
+        
+            
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            res = faiss.StandardGpuResources()
+            try:
+                index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+                salient_labels = np.load(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "saliency.npy"))
+            except:
+                index = None
+                salient_labels = None
+            cluster_2D(render_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            dino_weight=args.dino_weight,
+                            flow_weight=args.flow_weight,
+                            index = index,
+                            salient_labels = salient_labels,
+                            savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            )
+        return
+    if args.render_pcd_cluster_3D:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('RENDER pcd cluster in 3D')
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        bt_poses = create_bt_poses(hwf) 
+        bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'render-pcd_cluster_3D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #n_clusters = int(args.load_algo.split("/")[-1].split("_")[1])
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=n_clusters, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        res = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+        #           "./logs/experiment_Jumping_sal_F00-30/cluster_pcd-010_path_360001/large.index"))
+        salient_labels = np.load(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "saliency.npy"))
+        small_index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "small.index")))
+        #dino_normalizer = torch.load(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "dino_normalizer.pt"))
+        #small_index = pickle.load(open(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "save.pkl"), "rb"))
+        #point_normalizer = torch.load(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "point_normalizer.pt"))
+        #render_kwargs_test["N_samples"] = 64
+        #assert False, render_poses.shape
+        num_img = len(render_poses)
+        assert num_img == 24
+        for _ in range(num_img-1):
+            render_poses = np.concatenate([render_poses, render_poses[:1,...]], axis=0)
+        for i in range(11):
+            render_poses = np.concatenate([render_poses, render_poses[i+1:i+2, ...]], axis=0)
+        #render_poses = torch.cat([render_poses] + [render_poses[:1, :, :]]*num_img + render_poses[:12, :, :], dim=0)
+        img_idx_embeds = list(range(num_img)) + list(range(1, num_img)) + [0]*11
+        #assert False, [render_poses.shape, img_idx_embeds]
+        img_idx_embeds = [t/float(num_img) * 2. - 1.0 for t in img_idx_embeds]
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            render_pcd_cluster_3D(index, small_index, salient_labels, render_poses, img_idx_embeds, 
+                            hwf, args.chunk, render_kwargs_test, dino_weight=args.dino_weight,
+                            flow_weight=args.flow_weight,
+                            gt_imgs=images, savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            target_idx=10)
+        return
+    if args.cluster_finch:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('cluster in finch 3D')
+        assert args.use_tanh, "Need to make sure dino feature falls in between -1 and 1"
+        assert (args.dino_coe > 0) and (args.sal_coe > 0), "must have both dino head and saliency head"
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        #assert False, render_poses.shape
+        #bt_poses = create_bt_poses(hwf) 
+        #bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'cluster_finch-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=args.n_cluster, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        #salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
+        
+            
+        with torch.no_grad():
+            
+            cluster_finch(render_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            dino_weight=args.dino_weight,
+                            flow_weight=args.flow_weight, 
+                            savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            )
+        return
+    if args.render_sal_3D:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('RENDER saliency in 3D')
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        bt_poses = create_bt_poses(hwf) 
+        bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'render-sal_3D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #n_clusters = int(args.load_algo.split("/")[-1].split("_")[1])
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=n_clusters, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        #res = faiss.StandardGpuResources()
+        #index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+        #           "./logs/experiment_Jumping_sal_F00-30/cluster_pcd-010_path_360001/large.index"))
+        #salient_labels = np.load(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "saliency.npy"))
+        
+        #dino_normalizer = torch.load(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "dino_normalizer.pt"))
+        #clustering = pickle.load(open(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "save.pkl"), "rb"))
+        #point_normalizer = torch.load(os.path.join(basedir, expname, 'cluster_pcd-%03d'%\
+        #                        target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "point_normalizer.pt"))
+        #render_kwargs_test["N_samples"] = 64
+        #assert False, render_poses.shape
+        num_img = len(render_poses)
+        assert num_img == 24
+        for _ in range(num_img-1):
+            render_poses = np.concatenate([render_poses, render_poses[:1,...]], axis=0)
+        for i in range(11):
+            render_poses = np.concatenate([render_poses, render_poses[i+1:i+2, ...]], axis=0)
+        #render_poses = torch.cat([render_poses] + [render_poses[:1, :, :]]*num_img + render_poses[:12, :, :], dim=0)
+        img_idx_embeds = list(range(num_img)) + list(range(1, num_img)) + [0]*11
+        #assert False, [render_poses.shape, img_idx_embeds]
+        img_idx_embeds = [t/float(num_img) * 2. - 1.0 for t in img_idx_embeds]
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            render_sal_3D(render_poses, img_idx_embeds, 
                             hwf, args.chunk, render_kwargs_test,
                             gt_imgs=images, savedir=testsavedir, 
                             render_factor=args.render_factor, 
@@ -644,11 +1050,11 @@ def train():
                                 select_coords[:, 1]]  # (N_rand, 3)
             if args.dino_coe > 0:
                 
-                target_feat = feat_gt[(select_coords[:, 0] / float(images.shape[1]) * feats.shape[1]).long(),
-                                (select_coords[:, 1] / float(images.shape[2]) * feats.shape[2]).long()]
+                target_feat = feat_gt[(select_coords[:, 0] * (feats.shape[1] / float(images.shape[1]) )).long(),
+                                (select_coords[:, 1] * (feats.shape[2]/ float(images.shape[2]) )).long()]
                 if args.sal_coe > 0:
-                    target_sal = sal_gt[(select_coords[:, 0] / float(images.shape[1]) * sals.shape[1]).long(),
-                                (select_coords[:, 1] / float(images.shape[2]) * sals.shape[2]).long()]
+                    target_sal = sal_gt[(select_coords[:, 0] * (sals.shape[1]/ float(images.shape[1]) )).long(),
+                                (select_coords[:, 1] *( sals.shape[2]/ float(images.shape[2]) )).long()]
                     
             target_depth = depth_gt[select_coords[:, 0], 
                                 select_coords[:, 1]]

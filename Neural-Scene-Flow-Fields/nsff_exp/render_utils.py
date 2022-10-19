@@ -1660,9 +1660,9 @@ def cluster_2D(render_poses,
                      sample_interval=5,
                      n_cluster=25,
                      elbow=0.975,
-                     thresh=0.2,
-                     votes_percentage=80,
-                     similarity_thresh=0.4):
+                     thresh=0.07,
+                     votes_percentage=70,
+                     similarity_thresh=0.5):
     # import scipy.io
     torch.manual_seed(0)
     np.random.seed(0)
@@ -1786,7 +1786,7 @@ def cluster_2D(render_poses,
             #assert False, tmp["z_vals"].shape
             tmp["final_depth"] += tmp["T_i"] * tmp["alpha_final"] * tmp["z_vals"][..., j, None].cuda()
             tmp["T_i"] = tmp["T_i"] * (1.0 - tmp["alpha_final"] + 1e-10)
-        
+        '''
         # visualize dino image
         pca = PCA(n_components=3).fit(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
         pca_feats = pca.transform(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
@@ -1800,7 +1800,7 @@ def cluster_2D(render_poses,
         cv2.imwrite("test.png", pca_feats * 255.)
         
         assert False, "Pause"
-        
+        '''
         # blur saliency
         #tmp["final_sal"] = torch.nn.functional.interpolate(kornia.filters.blur_pool2d(tmp["final_sal"][None, ...].permute(0, 3, 1, 2), 3), (tmp["final_blend"].shape[0], tmp["final_blend"].shape[1]))[0].permute(1,2, 0)
         #assert False, [tmp["final_blend"].shape, tmp["final_sal"].shape]
@@ -1812,7 +1812,8 @@ def cluster_2D(render_poses,
         result = tmp["final_blend"]
         th4 = torch.quantile(torch.unique(tmp["final_sal"]), 0.5)
         th4 = 0.05
-        result[tmp["final_sal"] < th4] = 0 
+        result[tmp["final_sal"] < th4] = 0
+        result = tmp["final_sal"] 
         #result = torch.nn.functional.interpolate(kornia.filters.gaussian_blur2d(result[None, ...].permute(0, 3, 1, 2), (3,3), (1.5, 1.5)), (tmp["final_blend"].shape[0], tmp["final_blend"].shape[1]))[0].permute(1,2, 0)
         #cv2.imwrite("test.png", result.cpu().numpy()*255.)
         #assert False, th4
@@ -1842,17 +1843,20 @@ def cluster_2D(render_poses,
         torch.cuda.empty_cache()
     feature = torch.cat([
         torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight,
-        torch.nn.functional.normalize(torch.cat([samples["points"]], dim=-1), dim=-1),
+        #torch.nn.functional.normalize(torch.cat([samples["points"]], dim=-1), dim=-1),
         #samples["times"],
     ], dim=-1).cpu().numpy().astype(np.float32)
-    #sampled_feature = np.ascontiguousarray(feature[::sample_interval])
+    sampled_feature = np.ascontiguousarray(feature[::sample_interval])
+    '''
     #sampled_feature = feature[torch.cat(saliency_maps_list, dim=0).view(-1).cpu().numpy() > 0, :]
     is_bg_coords = torch.cat(saliency_maps_list, dim=0).view(-1).cpu().numpy() <= 0
     #fg_ratio = np.sum(is_bg_coords) / float(len(feature))
     #assert False, fg_ratio
-    print(np.sum(is_bg_coords) / float(len(feature)))
-    fg_ratio = 0.5
-    #fg_ratio = 1- np.sum(is_bg_coords) / float(len(feature))
+    #print(np.sum(is_bg_coords) / float(len(feature)))
+    
+    #fg_ratio = 0.5
+    fg_ratio = 1- np.sum(is_bg_coords) / float(len(feature)) # turn off fg sampling
+    
     fg_indices = np.random.choice(np.sum(~is_bg_coords), size=min(np.sum(~is_bg_coords), int(feature.shape[0]//sample_interval * fg_ratio)), replace=False)
     bg_indices = np.random.choice(np.sum(is_bg_coords), size=min(np.sum(is_bg_coords), int(len(fg_indices)*(1.-fg_ratio)/fg_ratio)) , replace=False)
     sampled_feature = np.concatenate([
@@ -1862,6 +1866,7 @@ def cluster_2D(render_poses,
     #print(f"{np.sum(~is_bg_coords)} foreground samples, {sampled_feature.shape[0] - np.sum(~is_bg_coords)} background samples")
     #sampled_feature = feature[indices]
     #assert False, [feature.shape[0]//sample_interval, sampled_feature.shape, np.sum(is_bg_coords), np.sum(~is_bg_coords), feature.shape[0]//sample_interval - np.sum(~is_bg_coords)]
+    '''
     sum_of_squared_dists = []
     n_cluster_range = list(range(1, n_cluster))
     for n_clu in tqdm(n_cluster_range):
@@ -1872,30 +1877,20 @@ def cluster_2D(render_poses,
         sum_of_squared_dists.append(objective / feature.shape[0])
         if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):    
             break
+            #pass
     faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "large.index")) 
     num_labels = np.max(n_clu) + 1
     labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
     
-    votes = np.zeros(num_labels)
-    for image_labels, saliency_map in zip(labels_per_image, saliency_maps_list):
-        for label in range(num_labels):
-            label_saliency = saliency_map[image_labels[:, 0] == label].mean()
-            if label_saliency > thresh:
-                votes[label] += 1
-    print(votes)
-    salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
-    with open(os.path.join(savedir, "salient.npy"), "wb") as f:
-        np.save(f, salient_labels)
-    
-
-    
-    
-    
-    
     # merge clusters
     # note: do it backwards! Let former clusters overwrite latter clusters
     
+    '''turn off merging'''
+    #similarity_thresh = 1
+
     centroids = algorithm.centroids
+    #centroids = np.linalg.norm(centroids, axis=0)
+    #assert False, centroids.shape
     sims = -np.ones((len(centroids), len(centroids)))
     assert samples["dinos"].shape[-1] == 64
     for c1 in range(len(centroids)):
@@ -1907,11 +1902,7 @@ def cluster_2D(render_poses,
     label_mapper = {} 
     print(salient_labels)       
     for c2 in range(len(centroids)):
-        if not np.any(salient_labels[0]==c2):
-            continue
         for c1 in range(c2):
-            if not np.any(salient_labels[0]==c1):
-                continue
             if sims[c1, c2] > similarity_thresh:
                 label_mapper[c2] = c1
                 break    
@@ -1926,9 +1917,27 @@ def cluster_2D(render_poses,
         if key in label_mapper:
             labels[labels == key] = label_mapper[key]
     #assert False, [np.unique(labels), label_mapper]
+    #print(labels)
+    
+    labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+
+    votes = np.zeros(num_labels)
+    for image_labels, saliency_map in zip(labels_per_image, saliency_maps_list):
+        for label in range(num_labels):
+            label_saliency = saliency_map[image_labels[:, 0] == label].mean()
+            if label_saliency > thresh:
+                votes[label] += 1
+    print(votes)
+    salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
+    with open(os.path.join(savedir, "salient.npy"), "wb") as f:
+        np.save(f, salient_labels)
+
+    '''turn off saliency voting'''
+    #salient_labels = np.unique(labels)
+    
+       
     
 
-    labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
     for idx, (rgb, image_labels, old_image_labels) in enumerate(zip(rgb_list, labels_per_image, old_labels_per_image)):
         img_clu = -np.ones_like(image_labels).astype(int)
         img_clu[np.isin(image_labels, salient_labels)] = image_labels[np.isin(image_labels, salient_labels)]

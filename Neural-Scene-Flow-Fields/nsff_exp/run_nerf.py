@@ -56,11 +56,16 @@ def config_parser():
                         help="cluster point cloud in 3D ")
     parser.add_argument("--cluster_2D", action="store_true",
                         help="cluster on 2D rendered result ")
+    parser.add_argument("--render_mode", action="store_true",
+                        help="generation decomposition result")
     parser.add_argument("--cluster_finch", action="store_true", help="cluster point cloud in 3D finch")
     parser.add_argument("--load_algo", type=str,
                         help="clustering algorithm to use")
     parser.add_argument("--n_cluster", type=int,
                         help="how many clusters to use")
+
+    parser.add_argument("--render_2D", action="store_true",
+                        help="Store 2D rendering result")
 
 
     parser.add_argument("--final_height", type=int, default=288, 
@@ -728,17 +733,79 @@ def train():
             try:
                 index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
                                 target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+                
                 salient_labels = np.load(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
-                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "saliency.npy"))
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "salient.npy"))
+                label_mapper = pickle.load(open(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "label_mapper.pkl"), "rb"))
+            
             except:
                 index = None
                 salient_labels = None
+                label_mapper = None
+            if args.render_mode:
+                assert index is not None and salient_labels is not None and label_mapper is not None
             cluster_2D(render_poses, 
                             hwf, args.chunk, render_kwargs_test,
                             dino_weight=args.dino_weight,
                             flow_weight=args.flow_weight,
                             index = index,
                             salient_labels = salient_labels,
+                            label_mapper = label_mapper,
+                            render_mode = args.render_mode,
+                            savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            )
+        return
+    if args.render_2D:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('render in 2D')
+        #assert args.use_tanh, "Need to make sure dino feature falls in between -1 and 1"
+        #assert (args.dino_coe > 0) and (args.sal_coe > 0), "must have both dino head and saliency head"
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        #assert False, render_poses.shape
+        #bt_poses = create_bt_poses(hwf) 
+        #bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'render_2D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=args.n_cluster, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        #salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
+        
+            
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            #res = faiss.StandardGpuResources()
+            #try:
+            #    index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+            #                    target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+            #    
+            #    salient_labels = np.load(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+            #                    target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "salient.npy"))
+            #    label_mapper = pickle.load(open(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+            #                    target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "label_mapper.pkl"), "rb"))
+            
+            #except:
+            #    index = None
+            #    salient_labels = None
+            #    label_mapper = None
+            #if args.render_mode:
+            #    assert index is not None and salient_labels is not None and label_mapper is not None
+            render_2D(render_poses, 
+                            hwf, args.chunk, render_kwargs_test,
                             savedir=testsavedir, 
                             render_factor=args.render_factor, 
                             )

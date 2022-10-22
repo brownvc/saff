@@ -1654,6 +1654,8 @@ def cluster_2D(render_poses,
                      quant_index=None,
                      index=None,
                      salient_labels=None,
+                     label_mapper = None,
+                     render_mode = False,
                      savedir=None, 
                      render_factor=0, 
                      alpha_threshold=0.2,
@@ -1706,7 +1708,14 @@ def cluster_2D(render_poses,
 
     }
 
-    num_img = render_poses.shape[0]    
+    if render_mode:
+        render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
+        #assert False, render_poses.shape
+        times = list(range(24)) + list(range(24)) + [0]*12
+    else:
+        times = list(range(24))
+
+    num_img = 24.  
     #num_img = 2
     
     '''store all non-opaque points and shuffle'''
@@ -1715,8 +1724,9 @@ def cluster_2D(render_poses,
     samples = {}
     saliency_maps_list = []
     rgb_list = []
-    for i in tqdm(range(num_img)):
-        cur_time = i
+    labels = None
+    for i in tqdm(range(render_poses.shape[0])):
+        cur_time = times[i]
         #flow_time = int(np.floor(cur_time))
         #ratio = cur_time - np.floor(cur_time)
         #print('cur_time ', i, cur_time, ratio)
@@ -1727,8 +1737,8 @@ def cluster_2D(render_poses,
         #                                        render_poses[flow_time + 1, :3, 3], 
         #                                        render_poses[flow_time + 1, :3, :3], 
         #                                        ratio)
-        int_rot = render_poses[cur_time, :3, :3]
-        int_trans = render_poses[cur_time, :3, 3]
+        int_rot = render_poses[i, :3, :3]
+        int_trans = render_poses[i, :3, 3]
         int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
         int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
 
@@ -1824,7 +1834,7 @@ def cluster_2D(render_poses,
         
         num_samples_per_image.append(tmp["times"].shape[0] * tmp["times"].shape[1])
         
-        if i == 0:
+        if i == 0 or samples["dinos"] is None:
             samples["dinos"] = tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1])
             samples["sals"] = tmp["final_sal"].view(-1, 1)
             samples["points"] = tmp["points"].view(-1, 3)
@@ -1841,6 +1851,49 @@ def cluster_2D(render_poses,
         for key in ret:
             ret[key] = None
         torch.cuda.empty_cache()
+
+        if render_mode and ((i==render_poses.shape[0] -1) or (i % 20 == 19)):
+            feature = torch.cat([
+                torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight
+                ], dim=-1).cpu().numpy().astype(np.float32)
+            _, current_labels = index.search(feature, 1)
+            #assert False, current_labels.shape
+            if labels is None:
+                labels = current_labels
+            else:
+                labels = np.concatenate([labels, current_labels], axis=0)
+
+            for key in samples:
+                samples[key] = None
+
+    
+
+    if render_mode:
+        
+        labels_per_image_no_merge_no_salient =[copy.deepcopy(item) for item in np.split(labels, np.cumsum(num_samples_per_image))]
+        for key in label_mapper:
+            labels[labels == key] = label_mapper[key]
+        #labels_per_image_no_merge_no_salient = copy.deepcopy(labels_per_image)
+        labels_per_image_no_salient = [copy.deepcopy(item) for item in np.split(labels, np.cumsum(num_samples_per_image))]
+        labels[~np.isin(labels, salient_labels)] = -1
+        labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+        
+        def write_label_image(img_clu, idx, name):
+            #img_clu = -np.ones_like(image_labels).astype(int)
+            #img_clu[np.isin(image_labels, salient_labels)] = image_labels[np.isin(image_labels, salient_labels)]
+            img_clu = d3_41_colors_rgb[img_clu.reshape((rgb_list[0].shape[0], rgb_list[0].shape[1]))]
+            cv2.imwrite(os.path.join(savedir, name, f"{idx}.png"),img_clu)
+
+        os.makedirs(os.path.join(savedir, "no_merge_no_salient"), exist_ok=True)
+        os.makedirs(os.path.join(savedir, "no_salient"), exist_ok=True)
+        os.makedirs(os.path.join(savedir, "final"), exist_ok=True)
+
+        for idx, (rgb, image_labels_no_merge_no_salient, image_labels_no_salient, final_labels) in enumerate(zip(rgb_list, labels_per_image_no_merge_no_salient, labels_per_image_no_salient, labels_per_image)):
+            write_label_image(image_labels_no_merge_no_salient, idx, "no_merge_no_salient")
+            write_label_image(image_labels_no_salient, idx, "no_salient")
+            write_label_image(final_labels, idx, "final")
+        
+        return
     feature = torch.cat([
         torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight,
         #torch.nn.functional.normalize(torch.cat([samples["points"]], dim=-1), dim=-1),
@@ -1867,6 +1920,7 @@ def cluster_2D(render_poses,
     #sampled_feature = feature[indices]
     #assert False, [feature.shape[0]//sample_interval, sampled_feature.shape, np.sum(is_bg_coords), np.sum(~is_bg_coords), feature.shape[0]//sample_interval - np.sum(~is_bg_coords)]
     '''
+
     sum_of_squared_dists = []
     n_cluster_range = list(range(1, n_cluster))
     for n_clu in tqdm(n_cluster_range):
@@ -2245,7 +2299,162 @@ def cluster_finch(render_poses,
     #
     return 
     
+def render_2D(render_poses, 
+                     hwf, chunk, render_kwargs, 
+                     savedir=None, 
+                     render_factor=0):
+    # import scipy.io
+    torch.manual_seed(0)
+    np.random.seed(0)
+    H, W, focal = hwf
 
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    #save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    #save_cls_dir = os.path.join(savedir, 'cls')
+    os.makedirs(savedir, exist_ok=True)
+    #os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None,
+        "dinos": None,
+        "sals": None
+    }
+    
+
+
+    render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
+    times = list(range(24)) + list(range(24)) + [0]*12
+    
+
+    num_img = 24.  
+    #num_img = 2
+    
+    '''store all non-opaque points and shuffle'''
+    ret = {}  
+    #num_samples_per_image = []
+    #samples = {}
+    #saliency_maps_list = []
+    #rgb_list = []
+    #labels = None
+    for i in tqdm(range(render_poses.shape[0])):
+        cur_time = times[i]
+        #flow_time = int(np.floor(cur_time))
+        #ratio = cur_time - np.floor(cur_time)
+        #print('cur_time ', i, cur_time, ratio)
+        #t = time.time()
+
+        #int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+        #                                        render_poses[flow_time, :3, :3],
+        #                                        render_poses[flow_time + 1, :3, 3], 
+        #                                        render_poses[flow_time + 1, :3, :3], 
+        #                                        ratio)
+        int_rot = render_poses[i, :3, :3]
+        int_trans = render_poses[i, :3, 3]
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        img_idx_embed = cur_time/float(num_img) * 2. - 1.0
+        #img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        for key in ret:
+            ret[key] = ret[key].cuda()
+        num_sample = ret['raw_rgb'].shape[2]
+        
+        tmp["T_i"] = torch.ones((1, H, W)).permute(1, 2, 0)
+        tmp["z_vals"] = ret["z_vals"]
+        tmp["final_depth"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_dino"] = torch.zeros((ret["raw_dino"].shape[-1], H, W)).permute(1, 2, 0)
+        tmp["final_blend"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_sal"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_rgb"] = torch.zeros((H, W, 3))
+        for j in tqdm(range(0, num_sample)):
+            #assert False, [ret["raw_alpha"].shape, ret["raw_dino"].shape]
+            tmp["final_rgb"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_rgb"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_rgb_rigid"][..., j, :]
+            )
+            tmp["final_dino"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_dino"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_dino_rigid"][..., j, :]
+            )
+            tmp["final_sal"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_sal"][..., j, :] + 
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_sal_rigid"][..., j, :]
+            )
+            tmp["final_blend"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None]
+            )
+            tmp["alpha_final"] = 1.0 - \
+                (1.0 - ret["raw_alpha"][..., j, None]) * \
+                (1.0 - ret["raw_alpha_rigid"][..., j, None])
+            #assert False, tmp["z_vals"].shape
+            tmp["final_depth"] += tmp["T_i"] * tmp["alpha_final"] * tmp["z_vals"][..., j, None].cuda()
+            tmp["T_i"] = tmp["T_i"] * (1.0 - tmp["alpha_final"] + 1e-10)
+        '''
+        # visualize dino image
+        pca = PCA(n_components=3).fit(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
+        pca_feats = pca.transform(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
+        pca_feats = pca_feats.reshape((tmp["final_dino"].shape[0], tmp["final_dino"].shape[1], pca_feats.shape[-1]))
+        for comp_idx in range(3):
+            comp = pca_feats[:, :, comp_idx]
+            comp_min = comp.min(axis=(0, 1))
+            comp_max = comp.max(axis=(0, 1))
+            comp_img = (comp - comp_min) / (comp_max - comp_min)
+            pca_feats[..., comp_idx] = comp_img
+        cv2.imwrite(os.path.join(savedir, f"{i}_dino.png"), pca_feats * 255.)
+        '''
+        torch.save(tmp["final_dino"].cpu(), os.path.join(savedir, f"{i}_dino.pt"))
+
+        cv2.imwrite(os.path.join(savedir, f"{i}_sal.png"), tmp["final_sal"].cpu().numpy()[..., 0]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_blend.png"), tmp["final_blend"].cpu().numpy()[..., 0]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_rgb.png"), tmp["final_rgb"].cpu().numpy()[..., [2, 1, 0]]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_depth.png"), tmp["final_depth"].cpu().numpy()[..., 0]*255.)
+        #print(torch.max(tmp["final_depth"]), torch.min(tmp["final_depth"]))
+        #assert False, "Pause"
+        
+        
+        for key in tmp:
+            tmp[key] = None
+        for key in ret:
+            ret[key] = None
+        torch.cuda.empty_cache()
+
+        
+    assert False, "Pause"
 
 def render_lockcam_slowmo(ref_c2w, num_img, 
                         hwf, chunk, render_kwargs, 

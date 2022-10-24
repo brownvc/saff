@@ -8,7 +8,7 @@ import json
 
 if __name__ == '__main__':
     
-    vis_folder = "/mnt/d/Research/NOF/data/ours_1018"
+    vis_folder = "/mnt/d/Research/NOF/data/NSFF_blend"
     gt_folder = "/mnt/d/Research/NOF/data/gt_masks"
 
     result = {
@@ -37,21 +37,24 @@ if __name__ == '__main__':
             gt_mask = cv2.imread(os.path.join(gt_folder, scene, "training_%2d.png" % num), cv2.IMREAD_GRAYSCALE)
             gt_mask = gt_mask.astype(int)
             gt_mask[gt_mask == 0] = -1
+            #assert False, np.unique(gt_mask)
             #if num == 0:
             #    pred_masks = torch.from_numpy(pred_masks)[:, None, :, :]
             #    pred_masks = torch.nn.functional.interpolate(pred_masks, size=(gt_mask.shape[0], gt_mask.shape[1]), mode='nearest').numpy()[:, 0, :, :]
             #pred_mask = pred_masks[num]
-            pred_mask = cv2.imread(os.path.join(vis_folder, scene, f"{num}.png"))
-            unique_colors = np.unique(pred_mask.reshape((-1, 3)), axis=0)[:,None, None, :]
-            ids = list(range(len(unique_colors)))
-            tmp = np.zeros_like(pred_mask).astype(int)-1
-            for color, idx in zip(unique_colors, ids):
+            pred_mask = cv2.imread(os.path.join(vis_folder, scene, f"{num}_blend.png"), cv2.IMREAD_GRAYSCALE)
+            pred_mask = pred_mask.astype(int)
+            pred_mask[pred_mask < np.quantile(pred_mask, 0.8)] = -1          
+            #unique_colors = np.unique(pred_mask.reshape((-1, 3)), axis=0)[:,None, None, :]
+            #ids = list(range(len(unique_colors)))
+            #tmp = np.zeros_like(pred_mask).astype(int)-1
+            #for color, idx in zip(unique_colors, ids):
                 #assert False, [pred_mask.shape, color.shape]
                 #print(color)
-                if color[0][0][0] == 0 and color[0][0][1] == 0 and color[0][0][2] == 0:
-                    continue
-                tmp[pred_mask == color] = idx
-            pred_mask = tmp[..., 0]
+            #    if color[0][0][0] == 0 and color[0][0][1] == 0 and color[0][0][2] == 0:
+            #        continue
+            #    tmp[pred_mask == color] = idx
+            #pred_mask = tmp[..., 0]
             #print(np.all(gt_mask == pred_mask))
 
             #assert False, [gt_mask.shape, fg_mask.shape, pred_mask.shape]
@@ -73,17 +76,19 @@ if __name__ == '__main__':
             #    pred_masks = torch.from_numpy(pred_masks)[:, None, :, :]
             #    pred_masks = torch.nn.functional.interpolate(pred_masks, size=(gt_mask.shape[0], gt_mask.shape[1]), mode='nearest').numpy()[:, 0, :, :]
             #pred_mask = pred_masks[num-25]
-            pred_mask = cv2.imread(os.path.join(vis_folder, scene, f"{num}.png"))
-            unique_colors = np.unique(pred_mask.reshape((-1, 3)), axis=0)[:,None, None, :]
-            ids = list(range(len(unique_colors)))
-            tmp = np.zeros_like(pred_mask).astype(int)-1
-            for color, idx in zip(unique_colors, ids):
+            pred_mask = cv2.imread(os.path.join(vis_folder, scene, f"{num}_blend.png"), cv2.IMREAD_GRAYSCALE)
+            pred_mask = pred_mask.astype(int)
+            pred_mask[pred_mask < np.quantile(pred_mask, 0.8)] = -1          
+            #unique_colors = np.unique(pred_mask.reshape((-1, 3)), axis=0)[:,None, None, :]
+            #ids = list(range(len(unique_colors)))
+            #tmp = np.zeros_like(pred_mask).astype(int)-1
+            #for color, idx in zip(unique_colors, ids):
                 #assert False, [pred_mask.shape, color.shape]
                 #print(color)
-                if color[0][0][0] == 0 and color[0][0][1] == 0 and color[0][0][2] == 0:
-                    continue
-                tmp[pred_mask == color] = idx
-            pred_mask = tmp[..., 0]
+            #    if color[0][0][0] == 0 and color[0][0][1] == 0 and color[0][0][2] == 0:
+            #        continue
+            #    tmp[pred_mask == color] = idx
+            #pred_mask = tmp[..., 0]
             
             #assert False, [gt_mask.shape, fg_mask.shape, pred_mask.shape]
             #print(num)
@@ -103,17 +108,19 @@ if __name__ == '__main__':
             #    pred_masks = torch.from_numpy(pred_masks)[:, None, :, :]
             #    pred_masks = torch.nn.functional.interpolate(pred_masks, size=(gt_mask.shape[0], gt_mask.shape[1]), mode='nearest').numpy()[:, 0, :, :]
             #pred_mask = pred_masks[num-49]
-            pred_mask = cv2.imread(os.path.join(vis_folder, scene, f"{num}.png"))
-            unique_colors = np.unique(pred_mask.reshape((-1, 3)), axis=0)[:,None, None, :]
-            ids = list(range(len(unique_colors)))
-            tmp = np.zeros_like(pred_mask).astype(int)-1
-            for color, idx in zip(unique_colors, ids):
+            pred_mask = cv2.imread(os.path.join(vis_folder, scene, f"{num}_blend.png"),cv2.IMREAD_GRAYSCALE)
+            pred_mask = pred_mask.astype(int)
+            pred_mask[pred_mask < np.quantile(pred_mask, 0.8)] = -1          
+            #unique_colors = np.unique(pred_mask.reshape((-1, 3)), axis=0)[:,None, None, :]
+            #ids = list(range(len(unique_colors)))
+            #tmp = np.zeros_like(pred_mask).astype(int)-1
+            #for color, idx in zip(unique_colors, ids):
                 #assert False, [pred_mask.shape, color.shape]
                 #print(color)
-                if color[0][0][0] == 0 and color[0][0][1] == 0 and color[0][0][2] == 0:
-                    continue
-                tmp[pred_mask == color] = idx
-            pred_mask = tmp[..., 0]
+            #    if color[0][0][0] == 0 and color[0][0][1] == 0 and color[0][0][2] == 0:
+            #        continue
+            #    tmp[pred_mask == color] = idx
+            #pred_mask = tmp[..., 0]
             #assert False, [gt_mask.shape, fg_mask.shape, pred_mask.shape]
             #print(num)
             #print("ARI: ", ARI(gt_mask, pred_mask))

@@ -808,6 +808,7 @@ def train():
                             hwf, args.chunk, render_kwargs_test,
                             savedir=testsavedir, 
                             render_factor=args.render_factor, 
+                            return_sem=args.dino_coe != 0
                             )
         return
     if args.render_pcd_cluster_3D:

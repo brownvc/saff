@@ -2302,7 +2302,8 @@ def cluster_finch(render_poses,
 def render_2D(render_poses, 
                      hwf, chunk, render_kwargs, 
                      savedir=None, 
-                     render_factor=0):
+                     render_factor=0,
+                     return_sem=True):
     # import scipy.io
     torch.manual_seed(0)
     np.random.seed(0)
@@ -2388,7 +2389,7 @@ def render_2D(render_poses,
                         H, W, focal, 
                         chunk=1024*16, 
                         c2w=tmp["render_pose"],
-                        return_sem=True,
+                        return_sem=return_sem,
                         **render_kwargs)
         for key in ret:
             ret[key] = ret[key].cuda()
@@ -2397,9 +2398,12 @@ def render_2D(render_poses,
         tmp["T_i"] = torch.ones((1, H, W)).permute(1, 2, 0)
         tmp["z_vals"] = ret["z_vals"]
         tmp["final_depth"] = torch.zeros((1, H, W)).permute(1, 2, 0)
-        tmp["final_dino"] = torch.zeros((ret["raw_dino"].shape[-1], H, W)).permute(1, 2, 0)
+        
+        if "raw_dino" in ret:
+            tmp["final_dino"] = torch.zeros((ret["raw_dino"].shape[-1], H, W)).permute(1, 2, 0)
         tmp["final_blend"] = torch.zeros((1, H, W)).permute(1, 2, 0)
-        tmp["final_sal"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        if "raw_sal" in ret:
+            tmp["final_sal"] = torch.zeros((1, H, W)).permute(1, 2, 0)
         tmp["final_rgb"] = torch.zeros((H, W, 3))
         for j in tqdm(range(0, num_sample)):
             #assert False, [ret["raw_alpha"].shape, ret["raw_dino"].shape]
@@ -2407,11 +2411,13 @@ def render_2D(render_poses,
                 ret["raw_alpha"][..., j, None] * ret["raw_rgb"][..., j, :] +
                 ret["raw_alpha_rigid"][..., j, None] * ret["raw_rgb_rigid"][..., j, :]
             )
-            tmp["final_dino"] += tmp["T_i"] * (
+            if "raw_dino" in ret:
+                tmp["final_dino"] += tmp["T_i"] * (
                 ret["raw_alpha"][..., j, None] * ret["raw_dino"][..., j, :] +
                 ret["raw_alpha_rigid"][..., j, None] * ret["raw_dino_rigid"][..., j, :]
             )
-            tmp["final_sal"] += tmp["T_i"] * (
+            if "raw_sal" in ret:
+                tmp["final_sal"] += tmp["T_i"] * (
                 ret["raw_alpha"][..., j, None] * ret["raw_sal"][..., j, :] + 
                 ret["raw_alpha_rigid"][..., j, None] * ret["raw_sal_rigid"][..., j, :]
             )
@@ -2437,9 +2443,10 @@ def render_2D(render_poses,
             pca_feats[..., comp_idx] = comp_img
         cv2.imwrite(os.path.join(savedir, f"{i}_dino.png"), pca_feats * 255.)
         '''
-        torch.save(tmp["final_dino"].cpu(), os.path.join(savedir, f"{i}_dino.pt"))
-
-        cv2.imwrite(os.path.join(savedir, f"{i}_sal.png"), tmp["final_sal"].cpu().numpy()[..., 0]*255.)
+        if "raw_dino" in ret:
+            torch.save(tmp["final_dino"].cpu(), os.path.join(savedir, f"{i}_dino.pt"))
+        if "raw_sal" in ret:
+            cv2.imwrite(os.path.join(savedir, f"{i}_sal.png"), tmp["final_sal"].cpu().numpy()[..., 0]*255.)
         cv2.imwrite(os.path.join(savedir, f"{i}_blend.png"), tmp["final_blend"].cpu().numpy()[..., 0]*255.)
         cv2.imwrite(os.path.join(savedir, f"{i}_rgb.png"), tmp["final_rgb"].cpu().numpy()[..., [2, 1, 0]]*255.)
         cv2.imwrite(os.path.join(savedir, f"{i}_depth.png"), tmp["final_depth"].cpu().numpy()[..., 0]*255.)

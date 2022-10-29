@@ -9,13 +9,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from run_nerf_helpers import *
 from tqdm import tqdm
-import open3d as o3d
+#import open3d as o3d
 from vis_dino import *
 from sklearn.cluster import SpectralClustering, DBSCAN
 import pickle
-import hdbscan
-from finch import FINCH
-import kornia
+#import hdbscan
+#from finch import FINCH
+#import kornia
 import copy
 from sklearn.decomposition import PCA
 

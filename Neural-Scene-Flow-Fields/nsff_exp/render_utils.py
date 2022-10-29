@@ -2850,8 +2850,9 @@ def render_rays_sm(img_idx,
         #    ret[k] = ret[k].cpu()
         ret['raw_dino'] = raw_dino
         ret['raw_dino_rigid'] = raw_dino_rigid
-        ret['raw_sal'] = raw_sal
-        ret['raw_sal_rigid'] = raw_sal_rigid
+        if raw_sal is not None:
+            ret['raw_sal'] = raw_sal
+            ret['raw_sal_rigid'] = raw_sal_rigid
     else:
         for k in ret:
             ret[k] = ret[k].cpu()

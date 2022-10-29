@@ -250,7 +250,7 @@ def train():
             # a version of multiresolution
             assert args.dino_coe >0, "has to make sure dino is being used"
             assert args.prep_dino, "Has to make sure dim is small enough other wise explode cpu/gpu"
-            assert args.sal_coe >0, "has to make sure saliency is smooth as well"
+            #assert args.sal_coe >0, "has to make sure saliency is smooth as well"
             extractor = ViTExtractor(args.model_type, args.stride, device=device)
             saliency_extractor = extractor
             

@@ -222,6 +222,8 @@ def config_parser():
     #args.use_multi_dino
     parser.add_argument("--use_multi_dino", action="store_true", help="whether use multi-resolution dino")  
 
+    parser.add_argument("--decay_extra", action="store_true", help="whether decay dino and sal L2 losses") 
+
     return parser
 
 
@@ -1344,9 +1346,17 @@ def train():
                                             target_sal,
                                             weights_map_dd) 
         if args.dino_coe > 0:
-            render_loss_dino = args.dino_coe * render_loss_dino
+            if args.decay_extra:
+                w_dino = args.dino_coe/(decay_rate ** divsor)
+            else:
+                w_dino = args.dino_coe 
+            render_loss_dino = w_dino * render_loss_dino
             if args.sal_coe > 0:
-                render_loss_sal = args.sal_coe * render_loss_sal
+                if args.decay_extra:
+                    w_sal = args.sal_coe/(decay_rate ** divsor)
+                else:
+                    w_sal = args.sal_coe
+                render_loss_sal = w_sal * render_loss_sal
         loss = sf_reg_loss + sf_cycle_loss + \
                render_loss + (render_loss_dino if args.dino_coe > 0 else 0) + (render_loss_sal if args.sal_coe > 0 else 0) + flow_loss + \
                sf_sm_loss + prob_reg_loss + \

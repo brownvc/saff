@@ -17,3 +17,4 @@ Neural-Scene-Flow-Fields/nsff_exp/__pycache__/*
 dino_utils/__pycache__/*
 benchmarks/*.png
 benchmarks/__pycache__/*
+dino_utils/*.png

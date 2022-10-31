@@ -68,7 +68,8 @@ if __name__ == "__main__":
     extractor = ViTExtractor(args.model_type, args.stride, device=device)
     saliency_extractor = extractor
 
-    dino_batch_size = 16
+    dino_batch_size_1 = 16
+    dino_batch_size = 8
     print(f"Using dino batch size {dino_batch_size}!")
 
     scenes = ["Balloon1-2", "Balloon2-2", "DynamicFace-2", "Jumping", "playground", "Skating-2", "Truck-2", "Umbrella"]
@@ -128,11 +129,7 @@ if __name__ == "__main__":
             
 
             feats = None
-            
-
             feats_1 = None
-            
-
             feats_2 = None
             
             
@@ -150,26 +147,35 @@ if __name__ == "__main__":
                 #assert False, np.unique(img_2)
 
                 print(f"Rendering for split {split}, image {image_id}, level 2:")
+                if feats_2 is not None:
+                    feats_2 = feats_2.to(device)
+                    sals_2 = sals_2.to(device)
                 with torch.no_grad():
                     batch = torch.from_numpy(img_2).permute(2, 0, 1)[None, ...]
                     feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
                     feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)        
                     feat_raw = F.interpolate(feat_raw, size=(dheight, dwidth), mode='nearest')
                     if feats_2 is None:
-                        feats_2 = torch.zeros((len(imgs), dheight, dwidth, feat_raw.shape[1]))
+                        feats_2 = torch.zeros((len(imgs), dheight, dwidth, feat_raw.shape[1])).to(device)
                         sals_2 = torch.zeros((len(imgs), dheight, dwidth, 1)).to(device)     
-                        counter_2 = torch.zeros((len(imgs), dheight, dwidth, 1)).to(device)
+                        counter_2 = torch.zeros((len(imgs), dheight, dwidth, 1))
+                    
                     #assert False, [feats_2.shape, feat_raw.shape]
-                    feats_2[image_id:image_id+1] = feat_raw.permute(0, 2, 3, 1)
+                    feats_2[image_id:image_id+1] = feat_raw.permute(0, 2, 3, 1).to(device)
                     counter_2[image_id:image_id+1] += 1
                     sal_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
                     sal_raw = sal_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
                     sal_raw = F.interpolate(sal_raw, size=(dheight, dwidth), mode='nearest')
                     #print(sals_2.device, sal_raw.device)
-                    sals_2[image_id:image_id+1] += sal_raw.permute(0, 2, 3, 1)
-                
+                    sals_2[image_id:image_id+1] = sal_raw.permute(0, 2, 3, 1).to(device)
+                feats_2 = feats_2.cpu()
+                sals_2 = sals_2.cpu()
+
                 print(f"Rendering for split {split}, image {image_id}, level 1:")
                 #start_height = 0
+                if feats_1 is not None:
+                    feats_1 = feats_1.to(device)
+                    sals_1 = sals_1.to(device)
                 pbar = tqdm(total=len(windows_1))
                 batch = None
                 pos = []
@@ -181,7 +187,7 @@ if __name__ == "__main__":
                         batch = torch.cat([batch, torch.from_numpy(img_1[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
                         #assert False, batch.shape
                     pos.append((start_height, start_width))
-                    if batch.shape[0] >= dino_batch_size:
+                    if batch.shape[0] >= dino_batch_size_1:
                         with torch.no_grad():
                             feats_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
                             feats_raw = feats_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
@@ -192,7 +198,7 @@ if __name__ == "__main__":
                         if feats_1 is None:
                             feats_1 = torch.zeros((len(imgs), 2*dheight, 2*dwidth, feat_raw.shape[1])).to(device)
                             sals_1 = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1)).to(device)     
-                            counter_1 = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1)).to(device)
+                            counter_1 = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1))
                         #assert False, [feats_1.shape, feats_raw.shape]
                         for t in range(len(batch)):
                             feat_raw = feats_raw[t:t+1]
@@ -204,22 +210,23 @@ if __name__ == "__main__":
                         pbar.update(len(batch))
                         batch = None
                         pos = []
-                        break
-                    
+                        #break
+                        
+                feats_1 = feats_1.cpu()
+                sals_1 = sals_1.cpu()
                     
                     
                 pbar.close()
 
-                feats_1 = feats_1.cpu()
-                sals_1 = sals_1.cpu()
-                counter_1 = counter_1.cpu()
+                
 
-                feats_2 = feats_2.cpu()
-                sals_2 = sals_2.cpu()
-                counter_2 = counter_2.cpu()
+                
 
                 print(f"Rendering for split {split}, image {image_id}, level 0:")
                 #start_height = 0
+                if feats is not None:
+                    feats = feats.to(device)
+                    sals = sals.to(device)
                 pbar = tqdm(total=len(windows))
                 batch = None
                 pos = []
@@ -244,7 +251,7 @@ if __name__ == "__main__":
                             if feats is None:
                                 feats = torch.zeros((len(imgs), height, width, feat_raw.shape[1])).to(device)
                                 sals = torch.zeros((len(imgs), height, width, 1)).to(device)     
-                                counter = torch.zeros((len(imgs), height, width, 1)).to(device)
+                                counter = torch.zeros((len(imgs), height, width, 1))
                             #print(feats.shape, feats_raw.shape)
                             for t in range(len(batch)):
                                 feat_raw = feats_raw[t:t+1]
@@ -258,7 +265,10 @@ if __name__ == "__main__":
                         batch = None
                         #break
                         pos = []
-                    
+                        #torch.cuda.empty_cache()
+                feats = feats.cpu()
+                sals = sals.cpu()
+                
                 pbar.close()
                 #break
                 #print("Debuggin! break after first image")

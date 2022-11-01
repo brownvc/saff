@@ -50,7 +50,8 @@ def imread(f):
         nv_static_imgs.append(img.astype(np.float32))
     return training_imgs, nv_spatial_imgs, nv_static_imgs
 
-if __name__ == "__main__":
+@torch.no_grad()
+def main():
     parser = config_parser()
     args = parser.parse_args()
 
@@ -129,9 +130,18 @@ if __name__ == "__main__":
 
             
 
-            feats = None
-            feats_1 = None
-            feats_2 = None
+            tmp = {"feats": None,
+                    "sals": None,
+                    "feats_1": None,
+                    "sals_1": None,
+                    "feats_2": None,
+                    "sals_2": None,
+                    "batch": None,
+                    "feat_raw": None,
+                    "sal_raw": None,
+                    "feats_raw": None,
+                    "sals_raw": None
+            }
             
             
             for image_id, img in enumerate(imgs):
@@ -148,73 +158,79 @@ if __name__ == "__main__":
                 #assert False, np.unique(img_2)
 
                 print(f"Rendering for split {split}, image {image_id}, level 2:")
-                if feats_2 is not None:
-                    feats_2 = feats_2.to(device)
-                    sals_2 = sals_2.to(device)
+                if tmp["feats_2"] is not None:
+                    tmp["feats_2"] = tmp["feats_2"].to(device)
+                    tmp["sals_2"] = tmp["sals_2"].to(device)
                 with torch.no_grad():
-                    batch = torch.from_numpy(img_2).permute(2, 0, 1)[None, ...]
-                    feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
-                    feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)        
-                    feat_raw = F.interpolate(feat_raw, size=(dheight, dwidth), mode='nearest')
-                    if feats_2 is None:
-                        feats_2 = torch.zeros((len(imgs), dheight, dwidth, feat_raw.shape[1])).to(device)
-                        sals_2 = torch.zeros((len(imgs), dheight, dwidth, 1)).to(device)     
-                        counter_2 = torch.zeros((len(imgs), dheight, dwidth, 1))
+                    tmp["batch"] = torch.from_numpy(img_2).permute(2, 0, 1)[None, ...].to(device)
+                    tmp["feat_raw"] = extractor.extract_descriptors(tmp["batch"], args.layer, args.facet, args.bin)
+                    tmp["feat_raw"] = tmp["feat_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)        
+                    tmp["feat_raw"] = F.interpolate(tmp["feat_raw"], size=(dheight, dwidth), mode='nearest')
+                    if tmp["feats_2"] is None:
+                        tmp["feats_2"] = torch.zeros((len(imgs), dheight, dwidth, tmp["feat_raw"].shape[1])).to(device)
+                        tmp["sals_2"] = torch.zeros((len(imgs), dheight, dwidth, 1)).to(device)     
+                        tmp["counter_2"] = torch.zeros((len(imgs), dheight, dwidth, 1))
                     
                     #assert False, [feats_2.shape, feat_raw.shape]
-                    feats_2[image_id:image_id+1] = feat_raw.permute(0, 2, 3, 1).to(device)
-                    counter_2[image_id:image_id+1] += 1
-                    sal_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
-                    sal_raw = sal_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
-                    sal_raw = F.interpolate(sal_raw, size=(dheight, dwidth), mode='nearest')
+                    tmp["feats_2"][image_id:image_id+1] = tmp["feat_raw"].permute(0, 2, 3, 1)
+                    tmp["counter_2"][image_id:image_id+1] += 1
+                    tmp["sal_raw"] = saliency_extractor.extract_saliency_maps(tmp["batch"])
+                    tmp["sal_raw"] = tmp["sal_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    tmp["sal_raw"] = F.interpolate(tmp["sal_raw"], size=(dheight, dwidth), mode='nearest')
                     #print(sals_2.device, sal_raw.device)
-                    sals_2[image_id:image_id+1] = sal_raw.permute(0, 2, 3, 1).to(device)
-                feats_2 = feats_2.cpu()
-                sals_2 = sals_2.cpu()
+                    tmp["sals_2"][image_id:image_id+1] = tmp["sal_raw"].permute(0, 2, 3, 1)
+                tmp["feats_2"] = tmp["feats_2"].cpu()
+                tmp["sals_2"] = tmp["sals_2"].cpu()
+                print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+                print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+                print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
 
                 print(f"Rendering for split {split}, image {image_id}, level 1:")
                 #start_height = 0
-                if feats_1 is not None:
-                    feats_1 = feats_1.to(device)
-                    sals_1 = sals_1.to(device)
+                if tmp["feats_1"] is not None:
+                    tmp["feats_1"] = tmp["feats_1"].to(device)
+                    tmp["sals_1"] = tmp["sals_1"].to(device)
                 pbar = tqdm(total=len(windows_1))
-                batch = None
+                tmp["batch"] = None
                 pos = []
                 for start_height, start_width in windows_1:
-                    if batch is None:
-                        batch = torch.from_numpy(img_1[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]
+                    if tmp["batch"] is None:
+                        tmp["batch"] = torch.from_numpy(img_1[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]
                         #assert False, batch.shape
                     else:
-                        batch = torch.cat([batch, torch.from_numpy(img_1[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
+                        tmp["batch"] = torch.cat([tmp["batch"], torch.from_numpy(img_1[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
                         #assert False, batch.shape
                     pos.append((start_height, start_width))
-                    if batch.shape[0] >= dino_batch_size_1:
+                    if tmp["batch"].shape[0] >= dino_batch_size_1:
                         with torch.no_grad():
-                            feats_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
-                            feats_raw = feats_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
-                            feats_raw = F.interpolate(feats_raw, size=(dheight, dwidth), mode='nearest')
-                            sals_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
-                            sals_raw = sals_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
-                            sals_raw = F.interpolate(sals_raw, size=(dheight, dwidth), mode='nearest')
-                        if feats_1 is None:
-                            feats_1 = torch.zeros((len(imgs), 2*dheight, 2*dwidth, feat_raw.shape[1])).to(device)
-                            sals_1 = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1)).to(device)     
-                            counter_1 = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1))
+                            tmp["batch"] = tmp["batch"].to(device)
+                            tmp["feats_raw"] = extractor.extract_descriptors(tmp["batch"], args.layer, args.facet, args.bin)
+                            tmp["feats_raw"] = tmp["feats_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                            tmp["feats_raw"] = F.interpolate(tmp["feats_raw"], size=(dheight, dwidth), mode='nearest')
+                            tmp["sals_raw"] = saliency_extractor.extract_saliency_maps(tmp["batch"])
+                            tmp["sals_raw"] = tmp["sals_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                            tmp["sals_raw"] = F.interpolate(tmp["sals_raw"], size=(dheight, dwidth), mode='nearest')
+                        if tmp["feats_1"] is None:
+                            tmp["feats_1"] = torch.zeros((len(imgs), 2*dheight, 2*dwidth, tmp["feats_raw"].shape[1])).to(device)
+                            tmp["sals_1"] = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1)).to(device)     
+                            tmp["counter_1"] = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1))
                         #assert False, [feats_1.shape, feats_raw.shape]
-                        for t in range(len(batch)):
-                            feat_raw = feats_raw[t:t+1]
-                            sal_raw = sals_raw[t:t+1]
+                        for t in range(len(tmp["batch"])):
+                            tmp["feat_raw"] = tmp["feats_raw"][t:t+1]
+                            tmp["sal_raw"] = tmp["sals_raw"][t:t+1]
                             hstart, wstart = pos[t]
-                            feats_1[image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += feat_raw.permute(0, 2, 3, 1)
-                            counter_1[image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += 1   
-                            sals_1[image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += sal_raw.permute(0, 2, 3, 1)
-                        pbar.update(len(batch))
-                        batch = None
+                            tmp["feats_1"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += tmp["feat_raw"].permute(0, 2, 3, 1)
+                            tmp["counter_1"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += 1   
+                            tmp["sals_1"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += tmp["sal_raw"].permute(0, 2, 3, 1)
+                        pbar.update(len(tmp["batch"]))
+                        tmp["batch"] = None
                         pos = []
                         #break
-                        
-                feats_1 = feats_1.cpu()
-                sals_1 = sals_1.cpu()
+                print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+                print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+                print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
+                tmp["feats_1"] = tmp["feats_1"].cpu()
+                tmp["sals_1"] = tmp["sals_1"].cpu()
                     
                     
                 pbar.close()
@@ -225,65 +241,80 @@ if __name__ == "__main__":
 
                 print(f"Rendering for split {split}, image {image_id}, level 0:")
                 #start_height = 0
-                if feats is not None:
-                    feats = feats.to(device)
-                    sals = sals.to(device)
+                if tmp["feats"] is not None:
+                    tmp["feats"] = tmp["feats"].to(device)
+                    tmp["sals"] = tmp["sals"].to(device)
                 pbar = tqdm(total=len(windows))
-                batch = None
+                tmp["batch"] = None
                 pos = []
                 #assert False, img.shape
                 for start_height, start_width in windows:
                     #print(start_height, start_width, torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...].shape)
-                    if batch is None:
-                        batch = torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]
+                    if tmp["batch"] is None:
+                        tmp["batch"] = torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]
                         #assert False, batch.shape
                     else:
-                        batch = torch.cat([batch, torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
+                        tmp["batch"] = torch.cat([tmp["batch"], torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
                         #assert False, batch.shape
                     pos.append((start_height, start_width))
-                    if batch.shape[0] >= dino_batch_size:
+                    if tmp["batch"].shape[0] >= dino_batch_size:
                         with torch.no_grad():
-                            feats_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
-                            feats_raw = feats_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
-                            feats_raw = F.interpolate(feats_raw, size=(dheight, dwidth), mode='nearest')
-                            sals_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
-                            sals_raw = sals_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
-                            sals_raw = F.interpolate(sals_raw, size=(dheight, dwidth), mode='nearest')
-                            if feats is None:
-                                feats = torch.zeros((len(imgs), height, width, feat_raw.shape[1])).to(device)
-                                sals = torch.zeros((len(imgs), height, width, 1)).to(device)     
-                                counter = torch.zeros((len(imgs), height, width, 1))
+                            tmp["batch"] = tmp["batch"].to(device)
+                            tmp["feats_raw"] = extractor.extract_descriptors(tmp["batch"], args.layer, args.facet, args.bin)
+                            tmp["feats_raw"] = tmp["feats_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                            tmp["feats_raw"] = F.interpolate(tmp["feats_raw"], size=(dheight, dwidth), mode='nearest')
+                            tmp["sals_raw"] = saliency_extractor.extract_saliency_maps(tmp["batch"])
+                            tmp["sals_raw"] = tmp["sals_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                            tmp["sals_raw"] = F.interpolate(tmp["sals_raw"], size=(dheight, dwidth), mode='nearest')
+                            if tmp["feats"] is None:
+                                tmp["feats"] = torch.zeros((len(imgs), height, width, tmp["feats_raw"].shape[1])).to(device)
+                                tmp["sals"] = torch.zeros((len(imgs), height, width, 1)).to(device)     
+                                tmp["counter"] = torch.zeros((len(imgs), height, width, 1))
                             #print(feats.shape, feats_raw.shape)
-                            for t in range(len(batch)):
-                                feat_raw = feats_raw[t:t+1]
-                                sal_raw = sals_raw[t:t+1]
+                            for t in range(len(tmp["batch"])):
+                                tmp["feat_raw"] = tmp["feats_raw"][t:t+1]
+                                tmp["sal_raw"] = tmp["sals_raw"][t:t+1]
                                 hstart, wstart = pos[t]
                                 #print(hstart+dheight, wstart+dwidth)
-                                feats[image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += feat_raw.permute(0, 2, 3, 1)
-                                counter[image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += 1   
-                                sals[image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += sal_raw.permute(0, 2, 3, 1)
-                        pbar.update(len(batch))
-                        batch = None
+                                tmp["feats"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += tmp["feat_raw"].permute(0, 2, 3, 1)
+                                tmp["counter"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += 1   
+                                tmp["sals"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += tmp["sal_raw"].permute(0, 2, 3, 1)
+                        pbar.update(len(tmp["batch"]))
+                        tmp["batch"] = None
                         #break
                         pos = []
                         #torch.cuda.empty_cache()
-                feats = feats.cpu()
-                sals = sals.cpu()
+                tmp["feats"] = tmp["feats"].cpu()
+                tmp["sals"] = tmp["sals"].cpu()
                 
                 pbar.close()
                 #break
                 #print("Debuggin! break after first image")
-            torch.save(feats, os.path.join(outdir, "feats.pt"))
-            torch.save(sals, os.path.join(outdir, "sals.pt"))
-            torch.save(counter, os.path.join(outdir, "counter.pt"))
+                tmp["batch"] = None
+                tmp["feat_raw"] = None
+                tmp["sal_raw"] = None
+                tmp["feats_raw"] = None
+                tmp["sals_raw"] = None
+            
+                torch.cuda.empty_cache()
+                print("torch.cuda.memory_allocated: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+                print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
+                print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
+                #break
+            torch.save(tmp["feats"], os.path.join(outdir, "feats.pt"))
+            torch.save(tmp["sals"], os.path.join(outdir, "sals.pt"))
+            torch.save(tmp["counter"], os.path.join(outdir, "counter.pt"))
 
-            torch.save(feats_1, os.path.join(outdir, "feats_1.pt"))
-            torch.save(sals_1, os.path.join(outdir, "sals_1.pt"))
-            torch.save(counter_1, os.path.join(outdir, "counter_1.pt"))
+            torch.save(tmp["feats_1"], os.path.join(outdir, "feats_1.pt"))
+            torch.save(tmp["sals_1"], os.path.join(outdir, "sals_1.pt"))
+            torch.save(tmp["counter_1"], os.path.join(outdir, "counter_1.pt"))
+            
+            torch.save(tmp["feats_2"], os.path.join(outdir, "feats_2.pt"))
+            torch.save(tmp["sals_2"], os.path.join(outdir, "sals_2.pt"))
+            torch.save(tmp["counter_2"], os.path.join(outdir, "counter_2.pt"))
 
-            torch.save(feats_2, os.path.join(outdir, "feats_2.pt"))
-            torch.save(sals_2, os.path.join(outdir, "sals_2.pt"))
-            torch.save(counter_2, os.path.join(outdir, "counter_2.pt"))
+            for item in tmp:
+                tmp[item] = None
         #break
         #print("Debugging! break after first scene")
     
@@ -312,6 +343,9 @@ if __name__ == "__main__":
     assert False, "are your sure everything is right?" 
     '''
 
+
+if __name__ == "__main__":
+    main()
 
 
 

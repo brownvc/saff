@@ -56,7 +56,7 @@ if __name__ == "__main__":
 
     root_dir = "../data/dino_material"
     print("For now, stride=1, and no PCA")
-    stride = 1
+    stride = 8
 
     '''loading all rgb images'''
     
@@ -104,18 +104,18 @@ if __name__ == "__main__":
         #assert False, width
         windows = []
         start_height = 0
-        while start_height + dheight <= height:
+        while start_height < height:
             start_width = 0
-            while start_width + dwidth <= width:
-                windows.append((start_height, start_width))
+            while start_width < width:
+                windows.append((min(height-dheight, start_height), min(width - dwidth, start_width)))
                 start_width += stride
             start_height += stride
         windows_1 = []
         start_height = 0
-        while start_height + dheight <= dheight*2:
+        while start_height < dheight*2:
             start_width = 0
-            while start_width + dwidth <= dwidth*2:
-                windows_1.append((start_height, start_width))
+            while start_width < dwidth*2:
+                windows_1.append((min(dheight*2-dheight, start_height), min(dwidth*2-dwidth, start_width)))
                 start_width += stride
             start_height += stride
         start_height = 0

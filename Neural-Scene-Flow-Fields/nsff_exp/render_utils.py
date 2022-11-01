@@ -1924,7 +1924,8 @@ def cluster_2D(render_poses,
     sum_of_squared_dists = []
     n_cluster_range = list(range(1, n_cluster))
     for n_clu in tqdm(n_cluster_range):
-        algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+        #algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+        algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=False, niter=300, nredo=10, seed=1234, verbose=False)
         algorithm.train(sampled_feature)
         squared_distances, labels = algorithm.index.search(feature, 1)
         objective = squared_distances.sum()
@@ -1932,7 +1933,9 @@ def cluster_2D(render_poses,
         if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):    
             break
             #pass
-    faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "large.index")) 
+    #faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "large.index")) 
+    faiss.write_index(algorithm.index, os.path.join(savedir, "large.index")) 
+    
     num_labels = np.max(n_clu) + 1
     labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
     

@@ -731,11 +731,12 @@ def train():
             
         with torch.no_grad():
             #assert False, "parameters not decided!"
-            res = faiss.StandardGpuResources()
+            #res = faiss.StandardGpuResources()
             try:
-                index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
-                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
-                
+                #index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                #                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+                index = faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index"))
                 salient_labels = np.load(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
                                 target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "salient.npy"))
                 label_mapper = pickle.load(open(os.path.join(basedir, expname, 'cluster_2D-%03d'%\

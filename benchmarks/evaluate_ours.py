@@ -8,8 +8,8 @@ import json
 
 if __name__ == '__main__':
     
-    vis_folder = "/mnt/d/Research/NOF/data/ours_1018"
-    gt_folder = "/mnt/d/Research/NOF/data/gt_masks"
+    vis_folder = "../data/1018+decay"
+    gt_folder = "../data/gt_masks"
 
     result = {
         

@@ -1,4 +1,5 @@
 import torch
+import torchvision
 import torch.nn.functional as F
 from extractor import *
 from cosegmentation import *
@@ -103,12 +104,13 @@ def main():
 
         print("Need to make sure that the windows are precomputed per scene as image shape may vary")
         #assert False, width
+        
         windows = []
         start_height = 0
         while start_height < height:
             start_width = 0
             while start_width < width:
-                windows.append((min(height-dheight, start_height), min(width - dwidth, start_width)))
+                windows.append((start_height, start_width))
                 start_width += stride
             start_height += stride
         windows_1 = []
@@ -116,13 +118,14 @@ def main():
         while start_height < dheight*2:
             start_width = 0
             while start_width < dwidth*2:
-                windows_1.append((min(dheight*2-dheight, start_height), min(dwidth*2-dwidth, start_width)))
+                windows_1.append((start_height, start_width))
                 start_width += stride
             start_height += stride
         start_height = 0
         start_width = 0
         #assert False, [len(windows), len(windows_1)]
         
+        padder = torch.nn.ReflectionPad2d((dwidth//2, dwidth//2, dheight//2, dheight//2))
 
         for split, imgs in zip(["training", "nv_spatial", "nv_static"], [training_imgs, nv_spatial_imgs, nv_static_imgs]):
             outdir = os.path.join(root_dir, scene, split)
@@ -157,6 +160,20 @@ def main():
                 img_2 = np.array(img_2).astype(np.float32)/255.
                 #assert False, np.unique(img_2)
 
+                
+                #pad img_1 and img_2
+                img_1 = torch.from_numpy(img_1).permute(2, 0, 1)
+                img_1 = padder(img_1).permute(1, 2, 0).numpy()
+                #assert False, img_1.shape
+                img = torch.from_numpy(img).permute(2, 0, 1)
+                img = padder(img).permute(1, 2, 0).numpy()
+                #assert False, img_2.shape
+                #Image.fromarray(np.uint8(img_1*255.)).save("img_1.png")
+                #Image.fromarray(np.uint8(img_2*255.)).save("img_2.png")
+                #assert False, [img_1.shape, img_2.shape, height, width, dheight, dwidth]
+                
+
+                #assert False, "add debugger for all affected by padding below"
                 print(f"Rendering for split {split}, image {image_id}, level 2:")
                 if tmp["feats_2"] is not None:
                     tmp["feats_2"] = tmp["feats_2"].to(device)
@@ -211,9 +228,9 @@ def main():
                             tmp["sals_raw"] = tmp["sals_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
                             tmp["sals_raw"] = F.interpolate(tmp["sals_raw"], size=(dheight, dwidth), mode='nearest')
                         if tmp["feats_1"] is None:
-                            tmp["feats_1"] = torch.zeros((len(imgs), 2*dheight, 2*dwidth, tmp["feats_raw"].shape[1])).to(device)
-                            tmp["sals_1"] = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1)).to(device)     
-                            tmp["counter_1"] = torch.zeros((len(imgs), 2*dheight, 2*dwidth, 1))
+                            tmp["feats_1"] = torch.zeros((len(imgs), 2*dheight+2 * (dheight//2), 2*dwidth+2 * (dwidth//2), tmp["feats_raw"].shape[1])).to(device)
+                            tmp["sals_1"] = torch.zeros((len(imgs), 2*dheight+2 * (dheight//2), 2*dwidth+2 * (dwidth//2), 1)).to(device)     
+                            tmp["counter_1"] = torch.zeros((len(imgs), 2*dheight+2 * (dheight//2), 2*dwidth+2 * (dwidth//2), 1))
                         #assert False, [feats_1.shape, feats_raw.shape]
                         for t in range(len(tmp["batch"])):
                             tmp["feat_raw"] = tmp["feats_raw"][t:t+1]
@@ -267,9 +284,9 @@ def main():
                             tmp["sals_raw"] = tmp["sals_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
                             tmp["sals_raw"] = F.interpolate(tmp["sals_raw"], size=(dheight, dwidth), mode='nearest')
                             if tmp["feats"] is None:
-                                tmp["feats"] = torch.zeros((len(imgs), height, width, tmp["feats_raw"].shape[1])).to(device)
-                                tmp["sals"] = torch.zeros((len(imgs), height, width, 1)).to(device)     
-                                tmp["counter"] = torch.zeros((len(imgs), height, width, 1))
+                                tmp["feats"] = torch.zeros((len(imgs), height+2 * (dheight//2), width+2 * (dwidth//2), tmp["feats_raw"].shape[1])).to(device)
+                                tmp["sals"] = torch.zeros((len(imgs), height+2 * (dheight//2), width+2 * (dwidth//2), 1)).to(device)     
+                                tmp["counter"] = torch.zeros((len(imgs), height+2 * (dheight//2), width+2 * (dwidth//2), 1))
                             #print(feats.shape, feats_raw.shape)
                             for t in range(len(tmp["batch"])):
                                 tmp["feat_raw"] = tmp["feats_raw"][t:t+1]
@@ -301,13 +318,28 @@ def main():
                 print("torch.cuda.memory_reserved: %fGB"%(torch.cuda.memory_reserved(0)/1024/1024/1024))
                 print("torch.cuda.max_memory_reserved: %fGB"%(torch.cuda.max_memory_reserved(0)/1024/1024/1024))
                 #break
-            torch.save(tmp["feats"], os.path.join(outdir, "feats.pt"))
-            torch.save(tmp["sals"], os.path.join(outdir, "sals.pt"))
-            torch.save(tmp["counter"], os.path.join(outdir, "counter.pt"))
+                #dino = tmp["feats"][0, dheight//2:-(dheight//2), dwidth//2:-(dwidth//2)]
+                #pca = PCA(n_components=3).fit(dino.contiguous().view(-1, dino.shape[-1])[::100])
+                #old_shape = dino.shape
+                #feats = torch.from_numpy(pca.transform(dino.contiguous().view(-1, dino.shape[-1]).numpy())).view(old_shape[0], old_shape[1], 3)
+                #for comp_idx in range(3):
+                #    comp = feats[..., comp_idx]
+                #    comp_min = torch.min(comp)
+                #    comp_max = torch.max(comp)
+                #    comp = (comp - comp_min) / (comp_max - comp_min)
+                #    feats[..., comp_idx] = comp
+                
+                #torchvision.transforms.functional.to_pil_image(feats.permute(2, 0, 1)).save("test.png")
+                
+                
+                #assert False
+            torch.save(tmp["feats"][:, dheight//2:-(dheight//2), dwidth//2:-(dwidth//2)], os.path.join(outdir, "feats.pt"))
+            torch.save(tmp["sals"][:, dheight//2:-(dheight//2), dwidth//2:-(dwidth//2)], os.path.join(outdir, "sals.pt"))
+            torch.save(tmp["counter"][:, dheight//2:-(dheight//2), dwidth//2:-(dwidth//2)], os.path.join(outdir, "counter.pt"))
 
-            torch.save(tmp["feats_1"], os.path.join(outdir, "feats_1.pt"))
-            torch.save(tmp["sals_1"], os.path.join(outdir, "sals_1.pt"))
-            torch.save(tmp["counter_1"], os.path.join(outdir, "counter_1.pt"))
+            torch.save(tmp["feats_1"][:, dheight//2:-(dheight//2), dwidth//2:-(dwidth//2)], os.path.join(outdir, "feats_1.pt"))
+            torch.save(tmp["sals_1"][:, dheight//2:-(dheight//2), dwidth//2:-(dwidth//2)], os.path.join(outdir, "sals_1.pt"))
+            torch.save(tmp["counter_1"][:, dheight//2:-(dheight//2), dwidth//2:-(dwidth//2)], os.path.join(outdir, "counter_1.pt"))
             
             torch.save(tmp["feats_2"], os.path.join(outdir, "feats_2.pt"))
             torch.save(tmp["sals_2"], os.path.join(outdir, "sals_2.pt"))

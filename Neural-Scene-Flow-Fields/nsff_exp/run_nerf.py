@@ -226,8 +226,8 @@ def config_parser():
     parser.add_argument("--decay_extra", action="store_true", help="whether decay dino and sal L2 losses") 
 
     parser.add_argument("--load_dino_dir", default="", type=str, help="If non-empty, load a feat-sal pyramid instead of generating online")
-    parser.add_argument('--load_feat_weight', nargs='+', help='how to weight different feature levels')
-    parser.add_argument('--load_sal_weight', nargs="+", help="how to weight different saliency levels")
+    parser.add_argument('--load_feat_weight', nargs='+', type=float, help='how to weight different feature levels')
+    parser.add_argument('--load_sal_weight', nargs="+", type=float, help="how to weight different saliency levels")
 
     return parser
 
@@ -255,9 +255,13 @@ def train():
         
         if args.load_dino_dir != "" and args.load_dino_dir is not None:
             assert os.path.exists(args.load_dino_dir), "Must load a valid pyramid!"
+            #print(args.load_feat_weight, args.load_sal_weight)
+            #args.load_feat_weight = [float(t) for t in args.load_feat_weight]
+            #args.load_sal_weight = [float(t) for t in args.load_sal_weight]
+            #assert False, [args.load_feat_weight, args.load_sal_weight]
             feats, sals, _ = load_feat_sal(args.load_dino_dir, args.n_components, args.load_feat_weight, args.load_sal_weight)
             #assert False, [feature.shape, sals.shape]
-            
+            '''
             #print("I am done")
             # visualize in PCA           
             pca = PCA(n_components=3).fit(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
@@ -274,6 +278,7 @@ def train():
             cv2.imwrite("test_gt.png", pca_feats * 255.)
             cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
             assert False, "visualize loaded feature image 0 and visualize loaded saliency image 0"
+            '''
         elif args.use_multi_dino:
             # a version of multiresolution
             assert args.dino_coe >0, "has to make sure dino is being used"

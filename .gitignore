@@ -18,3 +18,4 @@ dino_utils/__pycache__/*
 benchmarks/*.png
 benchmarks/__pycache__/*
 dino_utils/*.png
+dino_utils/*.pt

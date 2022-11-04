@@ -2,6 +2,7 @@ import sys
 sys.path.append("../../dino_utils")
 from cosegmentation import *
 from pca import *
+from pyramid import *
 import torch
 import os
 import cv2
@@ -11,6 +12,9 @@ import pickle
 from run_nerf_helpers import d3_41_colors_rgb
 import imageio
 import torch.nn.functional as F
+import copy
+
+from torchvision.utils import make_grid
 
 def preprocess_feats(feats, sample_interval, skip_norm=False):
     all_descriptors = torch.cat(feats, dim=0).contiguous()
@@ -28,7 +32,7 @@ def preprocess_feats(feats, sample_interval, skip_norm=False):
 
 @torch.no_grad()
 def cluster_feats(root_dir, out_dir, load_size, stride, model_type, facet, layer, bin, num_components=64, sample_interval=5, n_cluster=25, elbow=0.975, similarity_thresh=0.5, thresh=0.07, votes_percentage=70):
-    scenes = ["Balloon1-2", "Balloon2-2", "DynamicFace-2", "Jumping", "playground", "Skating-2", "Truck-2", "umbrella"]
+    scenes = ["Balloon1-2", "Balloon2-2", "DynamicFace-2", "Jumping", "playground", "Skating-2", "Truck-2", "Umbrella"]
     splits = ['train', 'nv_spatial', 'nv_static']
 
     device='cuda' if torch.cuda.is_available() else 'cpu'
@@ -49,8 +53,14 @@ def cluster_feats(root_dir, out_dir, load_size, stride, model_type, facet, layer
         H = None
         W = None
         num_samples_per_image = []
-        
-        for img in os.listdir(os.path.join(root_dir, name)):
+        img_dirs = []
+        tmp_idx = 0
+        while f'{tmp_idx}.jpg' in os.listdir(os.path.join(root_dir, name)):
+            img_dirs.append(f'{tmp_idx}.jpg')
+            tmp_idx += 1
+            #sorted(os.listdir(os.path.join(root_dir, name)))
+            #assert False, img_dirs
+        for img in img_dirs:
             #print(img)
             if not img.endswith('.jpg'):
                 continue
@@ -159,7 +169,14 @@ def cluster_feats(root_dir, out_dir, load_size, stride, model_type, facet, layer
             H = None
             W = None
             num_samples_per_image = []
-            for img in os.listdir(os.path.join(root_dir, name)):
+            img_dirs = []
+            tmp_idx = 0
+            while f'{tmp_idx}.jpg' in os.listdir(os.path.join(root_dir, name)):
+                img_dirs.append(f'{tmp_idx}.jpg')
+                tmp_idx += 1
+                #sorted(os.listdir(os.path.join(root_dir, name)))
+                #assert False, img_dirs
+            for img in img_dirs:
                 #print(img)
                 if not img.endswith('.jpg'):
                     continue
@@ -237,7 +254,15 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
             else:
                 return imageio.imread(f)
         
-        images = [imread(os.path.join(root_dir, name, f))[...,:3]/255. for f in os.listdir(os.path.join(root_dir, name)) if f.endswith('.jpg')]
+        img_dirs = []
+        tmp_idx = 0
+        while f'{tmp_idx}.jpg' in os.listdir(os.path.join(root_dir, name)):
+            img_dirs.append(f'{tmp_idx}.jpg')
+            tmp_idx += 1
+            #sorted(os.listdir(os.path.join(root_dir, name)))
+        #assert False, img_dirs
+        images = [imread(os.path.join(root_dir, name, f))[...,:3]/255. for f in img_dirs if f.endswith('.jpg')]
+        #assert False, images
         images = np.stack(images, 0)
         #assert False, imgs.shape
         H = images.shape[1]
@@ -294,7 +319,7 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
         for [image_id, start_height, start_width, end_height, end_width] in tqdm(coords):
             batch = images[image_id:image_id+1, start_height:end_height, start_width:end_width]
             batch = torch.tensor(batch).permute(0, 3, 1, 2).float()
-            batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
+            batch = F.interpolate(batch, size=(dheight, dwidth), mode='area')
             with torch.no_grad():
                 feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
                 feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
@@ -328,20 +353,35 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
         feats = [pca.transform(feat) for feat in feats]
         feats = torch.from_numpy(np.concatenate(feats, axis=0)).view(images.shape[0], images.shape[1], images.shape[2], -1)
         #assert False, [len(num_patches_list), pca_feats.shape]
-        
+        '''
+        pca = PCA(n_components=3).fit(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+        #print("I am done")
+        pca_feats = pca.transform(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+        #print("I am done")
+        pca_feats = pca_feats.reshape((images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
+        for comp_idx in range(3):
+            comp = pca_feats[:, :, comp_idx]
+            comp_min = comp.min(axis=(0, 1))
+            comp_max = comp.max(axis=(0, 1))
+            comp_img = (comp - comp_min) / (comp_max - comp_min)
+            pca_feats[..., comp_idx] = comp_img
+        cv2.imwrite("test_gt.png", pca_feats * 255.)
+        cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
+        assert False
+        '''
         feature = F.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).view(-1, num_components).numpy().astype(np.float32)        
         sampled_feature = np.ascontiguousarray(feature[::sample_interval])   
         sum_of_squared_dists = []
         n_cluster_range = list(range(1, n_cluster))
         for n_clu in tqdm(n_cluster_range):
-            algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+            algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=False, niter=300, nredo=10, seed=1234, verbose=False)
             algorithm.train(sampled_feature)
             squared_distances, labels = algorithm.index.search(feature, 1)
             objective = squared_distances.sum()
             sum_of_squared_dists.append(objective / feature.shape[0])
             if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):    
                 break
-        faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(out_dir, scene, "large.index")) 
+        faiss.write_index(algorithm.index, os.path.join(out_dir, scene, "large.index")) 
         num_labels = np.max(n_clu) + 1
         labels_per_image_no_merge_no_salient = np.split(labels, np.cumsum(num_samples_per_image))
 
@@ -406,8 +446,16 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
                     return imageio.imread(f, ignoregamma=True)
                 else:
                     return imageio.imread(f)
-            
-            images = [imread(os.path.join(root_dir, name, f))[...,:3]/255. for f in os.listdir(os.path.join(root_dir, name)) if f.endswith('.jpg')]
+            img_dirs = []
+            tmp_idx = 0
+            while f'{tmp_idx}.jpg' in os.listdir(os.path.join(root_dir, name)):
+                img_dirs.append(f'{tmp_idx}.jpg')
+                tmp_idx += 1
+                #sorted(os.listdir(os.path.join(root_dir, name)))
+            #assert False, img_dirs
+            images = [imread(os.path.join(root_dir, name, f))[...,:3]/255. for f in img_dirs if f.endswith('.jpg')]
+            #assert False, [sorted(os.listdir(os.path.join(root_dir, name))), os.listdir(os.path.join(root_dir, name))]
+            #images = [imread(os.path.join(root_dir, name, f))[...,:3]/255. for f in sorted(os.listdir(os.path.join(root_dir, name))) if f.endswith('.jpg')]
             images = np.stack(images, 0)
             #assert False, imgs.shape
             H = images.shape[1]
@@ -464,7 +512,7 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
             for [image_id, start_height, start_width, end_height, end_width] in tqdm(coords):
                 batch = images[image_id:image_id+1, start_height:end_height, start_width:end_width]
                 batch = torch.tensor(batch).permute(0, 3, 1, 2).float()
-                batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
+                batch = F.interpolate(batch, size=(dheight, dwidth), mode='area')
                 with torch.no_grad():
                     feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
                     feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
@@ -518,15 +566,196 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
                 cv2.imwrite(os.path.join(out_dir, scene, split, f"{idx}.png"), img_clu)
 
 
+def cluster_feats_pyramid(root_dir, expname, wfeats, wsals, n_components, sample_interval=5, n_cluster=25, elbow=0.975, similarity_thresh=0.5, thresh=0.07, votes_percentage=70):
+    
+    scenes = ["Balloon1-2", "Balloon2-2", "DynamicFace-2", "Jumping", "playground", "Skating-2", "Truck-2", "Umbrella"]
+    os.makedirs(os.path.join(root_dir, expname), exist_ok=True)
+    for scene in scenes:
+        os.makedirs(os.path.join(root_dir, expname, scene), exist_ok=True)
+        weights = [wfeats["wfeat"], wfeats["wfeat_1"], wfeats["wfeat_2"]]
+        sal_weights = [wsals["wsal"], wsals["wsal_1"], wsals["wsal_2"]]
+        feature, sals, pca = load_feat_sal(os.path.join(root_dir, scene, "training"), n_components, weights, sal_weights)
+        #assert False, ret["featss"].shape
+        #for item in ret:
+        #    print(item, 1ret[item].shape)
+        #assert False
+        #assert False, [wfeats, wsals]
+        #feats = torch.nn.functional.interpolate(torch.from_numpy(feats).permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1)
+        #feats = torch.nn.functional.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).numpy()
+        #sals = torch.nn.functional.interpolate(sals.permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1).view(sals.shape[0], -1)
+        num_img = feature.shape[0]
+        H, W = feature.shape[1], feature.shape[2]
+        num_samples_per_image = [H*W]*num_img
+        #feature = 0
+        #sals = 0 
+        #for level in ["", "_1", "_2"]:
+        #    feature += wfeats[f"wfeat{level}"] * ret[f"feats{level}"]
+        #    sals += wsals[f"wsal{level}"] * ret[f"sals{level}"]
+        '''
+        old_shape= feature.shape
+        featss = feature
+        cpca = PCA(n_components=3).fit(featss.view(-1, featss.shape[-1]))
+        featss = torch.from_numpy(cpca.transform(featss.view(-1, featss.shape[-1]).numpy())).view(old_shape[0], old_shape[1], old_shape[2], -1)
+        for comp_idx in range(3):
+            comp = featss[..., comp_idx]
+            comp_min = torch.min(comp)
+            comp_max = torch.max(comp)
+            comp = (comp - comp_min) / (comp_max - comp_min)
+            featss[..., comp_idx] = comp
+        time_idx = 0
+        #salss = sals
+        grids = None
+        while os.path.exists(os.path.join(root_dir, scene, "training", f"{time_idx}_feats.pt")):
+            feats = featss[time_idx]
+            #sals = salss[time_idx]    
+            grid = make_grid([feats.permute(2, 0, 1)*255.])
+            #assert False, [feat.shape, sal.shape, grid.shape]
+            #assert False, grid.shape
+            if grids is None:
+                grids = grid.permute(1, 2, 0)[None, ...]
+            else:
+                grids = torch.cat([grids, grid.permute(1,2,0)[None, ...]]) 
+            time_idx += 1
+            print(time_idx)
+        if grids.shape[-2] % 2 == 1:
+            grids = grids[:, :, :-1, :]
+        torchvision.io.write_video("test.mp4", 
+        grids, fps=1)
+        print(f"Done with {root_dir}")
+        
+        assert False, [feature.shape, sals.shape]
+        '''
+        sals = sals.view(sals.shape[0], -1, 1)
+        feature = torch.nn.functional.normalize(feature.view((-1, n_components)), dim=-1).numpy().astype(np.float32)
+        sampled_feature = np.ascontiguousarray(feature[::sample_interval])   
+        sum_of_squared_dists = []
+        n_cluster_range = list(range(1, n_cluster))
+        for n_clu in tqdm(n_cluster_range):
+            algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, niter=300, nredo=10, seed=1234, verbose=False)
+            algorithm.train(sampled_feature)
+            squared_distances, labels = algorithm.index.search(feature, 1)
+            objective = squared_distances.sum()
+            sum_of_squared_dists.append(objective / feature.shape[0])
+            if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):    
+                break
+        faiss.write_index(algorithm.index, os.path.join(root_dir, expname, scene, "large.index")) 
+        num_labels = np.max(n_clu) + 1
+        labels_per_image_no_merge_no_salient = copy.deepcopy(np.split(labels, np.cumsum(num_samples_per_image)))
 
+        centroids = algorithm.centroids
+        sims = -np.ones((len(centroids), len(centroids)))
+        #assert samples["dinos"].shape[-1] == 64
+        for c1 in range(len(centroids)):
+            item_1 = centroids[c1][:64]
+            for c2 in range(c1+1, len(centroids)):
+                item_2 = centroids[c2][:64]
+                sims[c1, c2] = np.dot(item_1, item_2) / (np.linalg.norm(item_1) * np.linalg.norm(item_2))
+                print(c1, c2, sims[c1, c2])
+        label_mapper = {}   
+        for c2 in range(len(centroids)):
+            for c1 in range(c2):
+                if sims[c1, c2] > similarity_thresh:
+                    label_mapper[c2] = c1
+                    break    
+        pickle.dump(label_mapper, open(os.path.join(root_dir, expname, scene, "label_mapper.pkl"), 'wb'))
+        for key in label_mapper:
+            print(key, label_mapper[key])
+        for c1 in range(len(centroids)):
+            key = len(centroids) - c1 - 1
+            if key in label_mapper:
+                labels[labels == key] = label_mapper[key]
+        labels_per_image_no_salient = np.split(labels, np.cumsum(num_samples_per_image))
 
+        votes = np.zeros(num_labels)
+        for image_labels, saliency_map in zip(labels_per_image_no_salient, sals):
+            #assert False, [saliency_map.shape, (image_labels[:, 0] == 0).shape]
+            for label in range(num_labels):
+                label_saliency = saliency_map[image_labels[:, 0] == label].mean()
+                if label_saliency > thresh:
+                    votes[label] += 1
+        print(votes)
+        salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
+        with open(os.path.join(root_dir, expname, scene, "salient.npy"), "wb") as f:
+            np.save(f, salient_labels)        
+        
 
+        labels[~np.isin(labels, salient_labels)] = -1
+        labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+        #assert False, labels_per_image[0].shape
+        os.makedirs(os.path.join(root_dir, expname, scene, "train"), exist_ok=True)
+        for idx, (image_labels_no_merge_no_salient, image_labels_no_salient, final_labels) in enumerate(zip(labels_per_image_no_merge_no_salient, labels_per_image_no_salient, labels_per_image)):
+            #assert False, [image_labels_no_merge_no_salient.shape, final_labels.shape]
+            #assert False, [type(final_labels), final_labels.shape]
+            img_clu = d3_41_colors_rgb[np.resize(image_labels_no_merge_no_salient, (H, W))]
+            #assert False, img_clu.shape
+            #img_clu.reshape((H, W, 3))
+            cv2.imwrite(os.path.join(root_dir, expname, scene, "train", f"{idx}_raw.png"), img_clu)
+            img_clu = d3_41_colors_rgb[np.resize(final_labels, (H, W))]
+            #assert False, img_clu.shape
+            #img_clu.reshape((H, W, 3))
+            cv2.imwrite(os.path.join(root_dir, expname, scene, "train", f"{idx}.png"), img_clu)
+        
+        for split in ["nv_spatial", "nv_static"]:
+            weights = [wfeats["wfeat"], wfeats["wfeat_1"], wfeats["wfeat_2"]]
+            sal_weights = [wsals["wsal"], wsals["wsal_1"], wsals["wsal_2"]]
+            feature, sals, _ = load_feat_sal(os.path.join(root_dir, scene, split), n_components, weights, sal_weights, pca=pca)
+            #assert False, ret["featss"].shape
+            #for item in ret:
+            #    print(item, 1ret[item].shape)
+            #assert False
+            #assert False, [wfeats, wsals]
+            #feats = torch.nn.functional.interpolate(torch.from_numpy(feats).permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1)
+            #feats = torch.nn.functional.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).numpy()
+            #sals = torch.nn.functional.interpolate(sals.permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1).view(sals.shape[0], -1)
+            num_img = feature.shape[0]
+            H, W = feature.shape[1], feature.shape[2]
+            num_samples_per_image = [H*W]*num_img
+            #ret = load_feat_sal(os.path.join(root_dir, scene, split), pcas)
+            #for item in ret:
+            #    print(item, ret[item].shape)
+            #assert False
+            #assert False, [wfeats, wsals]
+            #feats = torch.nn.functional.interpolate(torch.from_numpy(feats).permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1)
+            #feats = torch.nn.functional.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).numpy()
+            #sals = torch.nn.functional.interpolate(sals.permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1).view(sals.shape[0], -1)
+            #num_img = ret["feats"].shape[0]
+            #H, W = ret["feats"].shape[1], ret["feats"].shape[2]
+            #num_samples_per_image = [ret["feats"].shape[1] * ret["feats"].shape[2]]*num_img
+            #feature = 0
+            #sals = 0 
+            #for level in ["", "_1", "_2"]:
+            #    feature += wfeats[f"wfeat{level}"] * ret[f"feats{level}"]
+            #    sals += wsals[f"wsal{level}"] * ret[f"sals{level}"]
+            sals = sals.view(sals.shape[0], -1, 1)
+            feature = torch.nn.functional.normalize(feature.view((-1, n_components)), dim=-1).numpy().astype(np.float32)
+            
+            _, labels = algorithm.index.search(feature, 1)
+
+            for key in label_mapper:
+                labels[labels == key] = label_mapper[key]
+            
+            labels[~np.isin(labels, salient_labels)] = -1
+            
+            labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+            os.makedirs(os.path.join(root_dir, expname, scene, split), exist_ok=True)
+            for idx, final_labels in enumerate(labels_per_image):
+                #assert False, [image_labels_no_merge_no_salient.shape, final_labels.shape]
+                #assert False, [type(final_labels), final_labels.shape]
+                img_clu = d3_41_colors_rgb[np.resize(final_labels, (H, W))]
+                #assert False, img_clu.shape
+                #img_clu.reshape((H, W, 3))
+                cv2.imwrite(os.path.join(root_dir, expname, scene, split, f"{idx}.png"), img_clu)
+        
+        #assert False, "Pause"
     
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='cluster sems')
-    '''
+    
     parser.add_argument('--root_dir', type=str, required=True, help='The root dir of image sets.')
+    parser.add_argument("--wfeat_id", type=int, required=True)
+    parser.add_argument("--wsal_id", type=int, required=True)
+    '''
     parser.add_argument('--max_cluster', type=int, required=True, help='how many clusters')
     parser.add_argument('--depth_ratio', type=float, default=0, help="how much depth information to use")
     parser.add_argument('--pixel_ratio', type=float, default=0, help="how much pixel information to use")
@@ -556,9 +785,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    root_dir = "../../data/test_data" 
-    out_dir = "../../data/dino_masks_multi"  
-    cluster_feats_multi(root_dir, out_dir, args.load_size, args.stride, args.model_type, args.facet, args.layer, args.bin, num_components=64)
+    #root_dir = "../../data/test_data" 
+    #out_dir = "../../data/dino_masks_multi"  
+    #cluster_feats_multi(root_dir, out_dir, args.load_size, args.stride, args.model_type, args.facet, args.layer, args.bin, num_components=64)
+    #assert False
     '''
     feats = load_feats(args.root_dir, sample_interval=100, max_cluster=args.max_cluster, elbow=0.975, use_gt_dino=args.use_gt_dino, use_gt_sal=args.use_gt_sal, depth_ratio=args.depth_ratio, pixel_ratio=args.pixel_ratio,
         pts_ratio=args.pts_ratio,
@@ -566,3 +796,55 @@ if __name__ == "__main__":
         votes_percentage=args.votes_percentage, thresh=args.thresh,
         load_algo=args.load_algo)
     '''
+
+
+    wfeats_list = [
+        {
+            "wfeat": 1.,
+            "wfeat_1": 0.,
+            "wfeat_2": 0.
+        },
+        {
+            "wfeat": 1/3.,
+            "wfeat_1": 1/3.,
+            "wfeat_2": 1/3.
+        },
+        {
+            "wfeat": 1/7.,
+            "wfeat_1": 2/7.,
+            "wfeat_2": 4/7.
+        },
+        {
+            "wfeat": 0.,
+            "wfeat_1": 0.,
+            "wfeat_2": 1.
+        },
+    ]
+    wsals_list = [
+        {
+            "wsal": 1.,
+            "wsal_1": 0.,
+            "wsal_2": 0.
+        },
+        {
+            "wsal": 1/3.,
+            "wsal_1": 1/3.,
+            "wsal_2": 1/3.
+        },
+        {
+            "wsal": 1/7.,
+            "wsal_1": 2/7.,
+            "wsal_2": 4/7.
+        },
+        {
+            "wsal": 0.,
+            "wsal_1": 0.,
+            "wsal_2": 1.
+        },
+    ]
+
+    assert args.wfeat_id < len(wfeats_list), "not a valid feat weight id"
+    assert args.wsal_id < len(wsals_list), "not a valid sal weight id"
+
+
+    cluster_feats_pyramid(args.root_dir, f"cluster_dino_{args.wfeat_id}_{args.wsal_id}", wfeats_list[args.wfeat_id], wsals_list[args.wsal_id], n_components=64)

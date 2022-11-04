@@ -6,10 +6,20 @@ import os
 import torch
 import json
 
+
+
 if __name__ == '__main__':
     
-    vis_folder = "/mnt/d/Research/NOF/data/dino_masks_multi"
-    gt_folder = "/mnt/d/Research/NOF/data/gt_masks"
+    parser = argparse.ArgumentParser(description='cluster sems')
+    
+    parser.add_argument('--vis_folder', type=str, required=True, help='The root dir of image sets.')
+    parser.add_argument("--gt_folder", type=str, default="/users/yliang51/data/yliang51/NOF/data/gt_masks")
+    #parser.add_argument("--wsal_id", type=int, required=True)
+    #vis_folder = "/mnt/d/Research/NOF/data/dino_masks_multi"
+    #gt_folder = "/mnt/d/Research/NOF/data/gt_masks"
+    args = parser.parse_args()
+    vis_folder = args.vis_folder
+    gt_folder = args.gt_folder
 
     result = {
         

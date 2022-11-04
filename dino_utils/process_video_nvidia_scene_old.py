@@ -58,7 +58,7 @@ def main():
 
     root_dir = "../data/dino_material"
     print("For now, stride=1, and no PCA")
-    nstride = 2
+    stride = 64
 
     '''loading all rgb images'''
     
@@ -107,33 +107,33 @@ def main():
         
         windows = []
         start_height = 0
-        while True:
+        while start_height < height:
             start_width = 0
             while True:
-                windows.append((min(start_height, height-dheight), min(start_width, width-dwidth)))
+                windows.append((start_height, start_width))
                 if start_width + dwidth > width:
                     break 
-                start_width += dwidth // nstride
+                start_width += stride
             if start_height + dheight > height:
                 break
-            start_height += dheight // nstride
+            start_height += stride
         windows_1 = []
         start_height = 0
-        while True:
+        while start_height < dheight*2:
             start_width = 0
-            while True:
-                windows_1.append((min(start_height, height-2*dheight), min(start_width, width-2*dwidth)))
-                if start_width + 2*dwidth > width:
+            while start_width < dwidth*2:
+                windows_1.append((start_height, start_width))
+                if start_width + dwidth > dwidth*2:
                     break 
-                start_width += 2*dwidth // nstride
-            if start_height + 2*dheight > height:
+                start_width += stride
+            if start_height + dheight > dheight*2:
                 break
-            start_height += 2*dheight // nstride
+            start_height += stride
         start_height = 0
         start_width = 0
         #assert False, [len(windows), len(windows_1)]
         
-        #padder = torch.nn.ReflectionPad2d((0, dwidth//2, 0, dheight//2))
+        padder = torch.nn.ReflectionPad2d((0, dwidth//2, 0, dheight//2))
 
         for split, imgs in zip(["training", "nv_spatial", "nv_static"], [training_imgs, nv_spatial_imgs, nv_static_imgs]):
             outdir = os.path.join(root_dir, scene, split)
@@ -160,7 +160,7 @@ def main():
                 #assert False, img_1.size
                 img_2 = img_1.resize((dwidth, dheight), resample=Image.LANCZOS)
                 #img_1.save("img_1.png")
-                #img_1 = np.array(img_1).astype(np.float32)/255.
+                img_1 = np.array(img_1).astype(np.float32)/255.
                 #assert False, np.unique(img_1)
                 #assert False, img_2.size
                 #img_2.save("img_2.png")
@@ -170,11 +170,11 @@ def main():
 
                 
                 #pad img_1 and img_2
-                #img_1 = torch.from_numpy(img_1).permute(2, 0, 1)
-                #img_1 = padder(img_1).permute(1, 2, 0).numpy()
+                img_1 = torch.from_numpy(img_1).permute(2, 0, 1)
+                img_1 = padder(img_1).permute(1, 2, 0).numpy()
                 #assert False, img_1.shape
-                #img = torch.from_numpy(img).permute(2, 0, 1)
-                #img = padder(img).permute(1, 2, 0).numpy()
+                img = torch.from_numpy(img).permute(2, 0, 1)
+                img = padder(img).permute(1, 2, 0).numpy()
                 #assert False, img_2.shape
                 #Image.fromarray(np.uint8(img_1*255.)).save("img_1.png")
                 #Image.fromarray(np.uint8(img_2*255.)).save("img_2.png")
@@ -220,49 +220,45 @@ def main():
                 pbar = tqdm(total=len(windows_1))
                 tmp["batch"] = None
                 pos = []
-                for idx, (start_height, start_width) in enumerate(windows_1):
+                for start_height, start_width in windows_1:
                     if tmp["batch"] is None:
-                        tmp["batch"] = torch.from_numpy(img[start_height:start_height+2*dheight, start_width:start_width+2*dwidth]).permute(2, 0, 1)[None, ...]
+                        tmp["batch"] = torch.from_numpy(img_1[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]
                         #assert False, batch.shape
                     else:
-                        tmp["batch"] = torch.cat([tmp["batch"], torch.from_numpy(img[start_height:start_height+2*dheight, start_width:start_width+2*dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
+                        tmp["batch"] = torch.cat([tmp["batch"], torch.from_numpy(img_1[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
                         #assert False, batch.shape
-                    #old_shape = tmp["batch"].shape
                     pos.append((start_height, start_width))
-                    if tmp["batch"].shape[0] >= dino_batch_size_1 or idx == len(windows_1)-1:
+                    if tmp["batch"].shape[0] >= dino_batch_size_1:
                         with torch.no_grad():
                             tmp["batch"] = tmp["batch"].to(device)
-                            tmp["batch"] = torch.nn.functional.interpolate(tmp["batch"], size=(dheight, dwidth), mode='area')
                             tmp["feats_raw"] = extractor.extract_descriptors(tmp["batch"], args.layer, args.facet, args.bin)
                             tmp["feats_raw"] = tmp["feats_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
-                            tmp["feats_raw"] = F.interpolate(tmp["feats_raw"], size=(2*dheight, 2*dwidth), mode='nearest')
+                            tmp["feats_raw"] = F.interpolate(tmp["feats_raw"], size=(dheight, dwidth), mode='nearest')
                             tmp["sals_raw"] = saliency_extractor.extract_saliency_maps(tmp["batch"])
                             tmp["sals_raw"] = tmp["sals_raw"].view(tmp["batch"].shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
-                            tmp["sals_raw"] = F.interpolate(tmp["sals_raw"], size=(2*dheight, 2*dwidth), mode='nearest')
+                            tmp["sals_raw"] = F.interpolate(tmp["sals_raw"], size=(dheight, dwidth), mode='nearest')
                         if tmp["feats_1"] is None:
-                            tmp["feats_1"] = torch.zeros((height, width, tmp["feats_raw"].shape[1])).to(device)
-                            tmp["sals_1"] = torch.zeros((height, width, 1)).to(device)     
-                            tmp["counter_1"] = torch.zeros((height, width, 1))
+                            tmp["feats_1"] = torch.zeros((2*dheight, 2*dwidth, tmp["feats_raw"].shape[1])).to(device)
+                            tmp["sals_1"] = torch.zeros((2*dheight, 2*dwidth, 1)).to(device)     
+                            tmp["counter_1"] = torch.zeros((2*dheight, 2*dwidth, 1))
                         #assert False, [feats_1.shape, feats_raw.shape]
                         for t in range(len(tmp["batch"])):
                             tmp["feat_raw"] = tmp["feats_raw"][t:t+1]
                             tmp["sal_raw"] = tmp["sals_raw"][t:t+1]
                             hstart, wstart = pos[t]
-                            #hstart_real = max(0, hstart)
-                            #wstart_real = max(0, wstart)
-                            #hend_real = min(2*dheight, hstart+dheight)
-                            #wend_real = min(2*dwidth, wstart+dwidth)
-                            #hstart_crop = max(0, -hstart)
-                            #hend_crop = min(dheight, 2*dheight-hstart)
-                            #wstart_crop = max(0, -wstart)
-                            #wend_crop = min(dwidth, 2*dwidth-wstart)
-                            #assert False, [ tmp["feats_1"][hstart : hstart+2*dheight, wstart : wstart+2*dwidth].shape, 
-                            # tmp["feat_raw"].permute(0, 2, 3, 1)[0].shape]
-                            tmp["feats_1"][hstart : hstart+2*dheight, wstart : wstart+2*dwidth] +=\
-                             tmp["feat_raw"].permute(0, 2, 3, 1)[0]
-                            tmp["counter_1"][hstart : hstart+2*dheight, wstart : wstart+2*dwidth] += 1   
-                            tmp["sals_1"][hstart : hstart+2*dheight, wstart : wstart+2*dwidth] +=\
-                             tmp["sal_raw"].permute(0, 2, 3, 1)[0]
+                            hstart_real = max(0, hstart)
+                            wstart_real = max(0, wstart)
+                            hend_real = min(2*dheight, hstart+dheight)
+                            wend_real = min(2*dwidth, wstart+dwidth)
+                            hstart_crop = max(0, -hstart)
+                            hend_crop = min(dheight, 2*dheight-hstart)
+                            wstart_crop = max(0, -wstart)
+                            wend_crop = min(dwidth, 2*dwidth-wstart)
+                            tmp["feats_1"][hstart_real : hend_real, wstart_real : wend_real] +=\
+                             tmp["feat_raw"].permute(0, 2, 3, 1)[0, hstart_crop:hend_crop, wstart_crop: wend_crop]
+                            tmp["counter_1"][hstart_real : hend_real, wstart_real : wend_real] += 1   
+                            tmp["sals_1"][hstart_real : hend_real, wstart_real : wend_real] +=\
+                             tmp["sal_raw"].permute(0, 2, 3, 1)[0, hstart_crop:hend_crop, wstart_crop: wend_crop]
                         pbar.update(len(tmp["batch"]))
                         tmp["batch"] = None
                         pos = []
@@ -289,7 +285,7 @@ def main():
                 tmp["batch"] = None
                 pos = []
                 #assert False, img.shape
-                for idx, (start_height, start_width) in enumerate(windows):
+                for start_height, start_width in windows:
                     #print(start_height, start_width, torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...].shape)
                     if tmp["batch"] is None:
                         tmp["batch"] = torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]
@@ -297,10 +293,8 @@ def main():
                     else:
                         tmp["batch"] = torch.cat([tmp["batch"], torch.from_numpy(img[start_height:start_height+dheight, start_width:start_width+dwidth]).permute(2, 0, 1)[None, ...]], dim=0)
                         #assert False, batch.shape
-                    #old_shape = tmp["batch"].shape
-                    
                     pos.append((start_height, start_width))
-                    if tmp["batch"].shape[0] >= dino_batch_size or idx == len(windows)-1:
+                    if tmp["batch"].shape[0] >= dino_batch_size:
                         with torch.no_grad():
                             tmp["batch"] = tmp["batch"].to(device)
                             tmp["feats_raw"] = extractor.extract_descriptors(tmp["batch"], args.layer, args.facet, args.bin)
@@ -327,11 +321,11 @@ def main():
                                 hend_crop = min(dheight, height-hstart)
                                 wstart_crop = max(0, -wstart)
                                 wend_crop = min(dwidth, width-wstart)
-                                tmp["feats"][hstart : hstart+dheight, wstart : wstart+dwidth] +=\
-                                  tmp["feat_raw"].permute(0, 2, 3, 1)[0]
-                                tmp["counter"][hstart : hstart+dheight, wstart : wstart+dwidth] += 1   
-                                tmp["sals"][hstart : hstart+dheight, wstart : wstart+dwidth] +=\
-                                  tmp["sal_raw"].permute(0, 2, 3, 1)[0]
+                                tmp["feats"][hstart_real : hend_real, wstart_real : wend_real] +=\
+                                  tmp["feat_raw"].permute(0, 2, 3, 1)[0, hstart_crop:hend_crop, wstart_crop: wend_crop]
+                                tmp["counter"][hstart_real : hend_real, wstart_real : wend_real] += 1   
+                                tmp["sals"][hstart_real : hend_real, wstart_real : wend_real] +=\
+                                  tmp["sal_raw"].permute(0, 2, 3, 1)[0, hstart_crop:hend_crop, wstart_crop: wend_crop]
                                 #assert False
                                 #tmp["feats"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += tmp["feat_raw"].permute(0, 2, 3, 1)
                                 #tmp["counter"][image_id:image_id+1, hstart:hstart+dheight, wstart:wstart+dwidth] += 1   

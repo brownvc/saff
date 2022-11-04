@@ -19,7 +19,8 @@ from extractor import *
 from cosegmentation import *
 from sklearn.decomposition import PCA, IncrementalPCA
 import pickle
-
+from pyramid import load_feat_sal
+#(dino_dir, n_components, weights, sal_weights, pca=None)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(1)
@@ -224,6 +225,10 @@ def config_parser():
 
     parser.add_argument("--decay_extra", action="store_true", help="whether decay dino and sal L2 losses") 
 
+    parser.add_argument("--load_dino_dir", default="", type=str, help="If non-empty, load a feat-sal pyramid instead of generating online")
+    parser.add_argument('--load_feat_weight', nargs='+', help='how to weight different feature levels')
+    parser.add_argument('--load_sal_weight', nargs="+", help="how to weight different saliency levels")
+
     return parser
 
 
@@ -248,7 +253,28 @@ def train():
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
         
-        if args.use_multi_dino:
+        if args.load_dino_dir != "" and args.load_dino_dir is not None:
+            assert os.path.exists(args.load_dino_dir), "Must load a valid pyramid!"
+            feats, sals, _ = load_feat_sal(args.load_dino_dir, args.n_components, args.load_feat_weight, args.load_sal_weight)
+            #assert False, [feature.shape, sals.shape]
+            
+            #print("I am done")
+            # visualize in PCA           
+            pca = PCA(n_components=3).fit(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca.transform(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca_feats.reshape((images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
+            for comp_idx in range(3):
+                comp = pca_feats[:, :, comp_idx]
+                comp_min = comp.min(axis=(0, 1))
+                comp_max = comp.max(axis=(0, 1))
+                comp_img = (comp - comp_min) / (comp_max - comp_min)
+                pca_feats[..., comp_idx] = comp_img
+            cv2.imwrite("test_gt.png", pca_feats * 255.)
+            cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
+            assert False, "visualize loaded feature image 0 and visualize loaded saliency image 0"
+        elif args.use_multi_dino:
             # a version of multiresolution
             assert args.dino_coe >0, "has to make sure dino is being used"
             assert args.prep_dino, "Has to make sure dim is small enough other wise explode cpu/gpu"

@@ -6,6 +6,7 @@ Neural-Scene-Flow-Fields/nsff_scripts/midas*
 Neural-Scene-Flow-Fields/nsff_scripts/viz_*
 Neural-Scene-Flow-Fields/nsff_exp/logs
 Neural-Scene-Flow-Fields/nsff_exp/*.png
+Neural-Scene-Flow-Fields/nsff_exp/*.mp4
 Neural-Scene-Flow-Fields/nsff_exp/*.npy
 Neural-Scene-Flow-Fields/nsff_exp/*.ply
 Neural-Scene-Flow-Fields/nsff_scripts/*.zip

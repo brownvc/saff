@@ -8,7 +8,7 @@ from sklearn.decomposition import PCA
 import os
 import numpy as np
 import imageio
-import imageio.v3 as iio
+#import imageio.v3 as iio
 
 from PIL import Image
 

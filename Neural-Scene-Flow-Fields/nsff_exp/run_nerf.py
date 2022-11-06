@@ -229,6 +229,8 @@ def config_parser():
     parser.add_argument('--load_feat_weight', nargs='+', type=float, help='how to weight different feature levels')
     parser.add_argument('--load_sal_weight', nargs="+", type=float, help="how to weight different saliency levels")
 
+    parser.add_argument("--use_multi_dino_single_sal", action="store_true", help="whether use multi-resolution dino and single-level saliency")
+
     return parser
 
 
@@ -253,7 +255,132 @@ def train():
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
         
-        if args.load_dino_dir != "" and args.load_dino_dir is not None:
+        if args.use_multi_dino_single_sal:
+            # a version of multiresolution
+            assert args.dino_coe >0, "has to make sure dino is being used"
+            assert args.prep_dino, "Has to make sure dim is small enough other wise explode cpu/gpu"
+            #assert args.sal_coe >0, "has to make sure saliency is smooth as well"
+            extractor = ViTExtractor(args.model_type, args.stride, device=device)
+            saliency_extractor = extractor
+            
+            # first calculate all bbox for each image to compute
+            # then as in the old time, group into batch
+            start = 0
+            N_samples = [0, 0.5, 1]
+            coords = []
+            height, width = images.shape[1], images.shape[2]
+            if height < width:
+                dwidth = int(args.load_dino_size / float(height) * width)
+                dheight = args.load_size
+            else:
+                dheight = int(args.load_dino_size / float(width) * height)
+                dwidth = args.load_size
+            
+            # for each image
+            while start < images.shape[0]:
+                #coords = []
+                for N_sample in N_samples:
+                    if N_sample == 0:
+                        coords.append([start, 0, 0, images[0].shape[0], images[0].shape[1]])
+                    else:
+                        height_size = int(dheight // N_sample)
+                        width_size = int(dwidth // N_sample)                        
+                        height_step = height_size // 2
+                        width_step = width_size // 2
+                        start_height = 0
+                        while start_height < height - height_size:
+                            start_width = 0
+                            while start_width < width - width_size:
+                                coords.append([start, start_height, start_width, start_height + height_size, start_width + width_size])
+                                if start_width == width-width_size -1:
+                                    break
+                                start_width = min(width-width_size-1, start_width + width_step)
+                            if start_height == height-height_size - 1:
+                                break
+                            start_height = min(height - height_size-1, start_height + height_step)
+                start += 1
+                #coordss.append(coords)
+            #print(coords)
+            #assert False, coords
+            start = None
+            
+            
+            feats = None
+            #torch.zeros((len(images), images[0].shape[0], images[0].shape[1], args.n_components))
+            counter = torch.zeros((len(images), images[0].shape[0], images[0].shape[1], 1))     
+            #sals = torch.zeros((len(images), images[0].shape[0], images[0].shape[1], 1))            
+            for [image_id, start_height, start_width, end_height, end_width] in tqdm(coords):
+                batch = images[image_id:image_id+1, start_height:end_height, start_width:end_width]
+                batch = torch.tensor(batch).permute(0, 3, 1, 2)
+                batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
+                with torch.no_grad():
+                    feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
+                    feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    feat_raw = F.interpolate(feat_raw, size=(end_height - start_height, end_width - start_width), mode='nearest')
+                    if feats is None:
+                        feats = torch.zeros((len(images), images[0].shape[0], images[0].shape[1], feat_raw.shape[1]))
+                    #assert False, [feats.shape, feat_raw.shape]
+                    feats[image_id:image_id+1, start_height:end_height, start_width:end_width] += feat_raw.permute(0, 2, 3, 1)
+                    counter[image_id:image_id+1, start_height:end_height, start_width:end_width] += 1
+                    #sal_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
+                    #sal_raw = sal_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    #sal_raw = F.interpolate(sal_raw, size=(end_height - start_height, end_width - start_width), mode='nearest')
+                    #sals[image_id:image_id+1, start_height:end_height, start_width:end_width] += sal_raw.permute(0, 2, 3, 1)
+                   
+            feats /= 1e-16 + counter
+            #sals /= 1e-16 + counter
+            
+            feats = F.normalize(feats, p=2, eps=1e-12, dim=-1).cpu()
+            counter = None
+            sals = torch.zeros((len(images), images[0].shape[0], images[0].shape[1], 1))     
+            for image_id in range(len(images)):
+                batch = images[image_id:image_id+1]
+                batch = torch.tensor(batch).permute(0, 3, 1, 2)
+                batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
+                with torch.no_grad():
+                    sal_raw = saliency_extractor.extract_saliency_maps(batch.to(device))
+                    sal_raw = sal_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
+                    sal_raw = F.interpolate(sal_raw, size=(sals.shape[1], sals.shape[2]), mode='nearest')
+                    sals[image_id:image_id+1] += sal_raw.permute(0, 2, 3, 1)
+
+            sals = sals.cpu()
+
+            #print("I am done")
+            pca = PCA(n_components=args.n_components).fit(feats.view(-1, feats.shape[-1])[::100])
+            #print("I am done")
+            #print("I am done")
+            split_idxs = np.array([images.shape[1] * images.shape[2] for _ in range(images.shape[0])])
+            split_idxs = np.cumsum(split_idxs)
+            feats = np.split(feats.view(-1, feats.shape[-1]).numpy(), split_idxs[:-1], axis=0)
+            #print("I am done")
+            feats = [pca.transform(feat) for feat in feats]
+            feats = torch.from_numpy(np.concatenate(feats, axis=0)).view(images.shape[0], images.shape[1], images.shape[2], -1)
+            #assert False, [len(num_patches_list), pca_feats.shape]
+            
+            '''
+            #print("I am done")
+            # visualize in PCA           
+            pca = PCA(n_components=3).fit(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca.transform(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca_feats.reshape((images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
+            for comp_idx in range(3):
+                comp = pca_feats[:, :, comp_idx]
+                comp_min = comp.min(axis=(0, 1))
+                comp_max = comp.max(axis=(0, 1))
+                comp_img = (comp - comp_min) / (comp_max - comp_min)
+                pca_feats[..., comp_idx] = comp_img
+            cv2.imwrite("test_gt.png", pca_feats * 255.)
+            assert False
+            '''
+            cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
+            assert False
+            
+            print("Loaded dino features ", feats.shape)
+            start = None
+            pca = None
+        elif args.load_dino_dir != "" and args.load_dino_dir is not None:
             assert os.path.exists(args.load_dino_dir), "Must load a valid pyramid!"
             #print(args.load_feat_weight, args.load_sal_weight)
             #args.load_feat_weight = [float(t) for t in args.load_feat_weight]

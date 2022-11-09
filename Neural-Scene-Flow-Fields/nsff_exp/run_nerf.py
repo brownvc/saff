@@ -59,6 +59,8 @@ def config_parser():
                         help="cluster on 2D rendered result ")
     parser.add_argument("--render_mode", action="store_true",
                         help="generation decomposition result")
+    parser.add_argument("--no_merge", action="store_true",
+                        help="no merge step")
     parser.add_argument("--cluster_finch", action="store_true", help="cluster point cloud in 3D finch")
     parser.add_argument("--load_algo", type=str,
                         help="clustering algorithm to use")
@@ -373,10 +375,10 @@ def train():
                 pca_feats[..., comp_idx] = comp_img
             cv2.imwrite("test_gt.png", pca_feats * 255.)
             assert False
-            '''
+            
             cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
             assert False
-            
+            '''
             print("Loaded dino features ", feats.shape)
             start = None
             pca = None
@@ -872,6 +874,9 @@ def train():
         testsavedir = os.path.join(basedir, expname, 
                                 'cluster_2D-%03d'%\
                                 target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        if args.no_merge:
+            testsavedir += "_no_merge"
+            #assert False, testsavedir
         #assert False, testsavedir
         os.makedirs(testsavedir, exist_ok=True)
         #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
@@ -893,19 +898,22 @@ def train():
             try:
                 #index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
                 #                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
-                index = faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
-                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index"))
-                salient_labels = np.load(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
-                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "salient.npy"))
-                label_mapper = pickle.load(open(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
-                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "label_mapper.pkl"), "rb"))
-            
+                index = faiss.read_index(os.path.join(testsavedir, "large.index"))
+                salient_labels = np.load(os.path.join(testsavedir, "salient.npy"))
+                if not args.no_merge:
+                    #assert label_mapper is not None
+                    label_mapper = pickle.load(open(os.path.join(testsavedir, "label_mapper.pkl")), "rb")
+                else:
+                    label_mapper = None
             except:
                 index = None
                 salient_labels = None
                 label_mapper = None
             if args.render_mode:
-                assert index is not None and salient_labels is not None and label_mapper is not None
+                assert index is not None 
+                assert salient_labels is not None 
+                if not args.no_merge:
+                    assert label_mapper is not None
             cluster_2D(render_poses, 
                             hwf, args.chunk, render_kwargs_test,
                             dino_weight=args.dino_weight,
@@ -914,6 +922,7 @@ def train():
                             salient_labels = salient_labels,
                             label_mapper = label_mapper,
                             render_mode = args.render_mode,
+                            no_merge = args.no_merge,
                             savedir=testsavedir, 
                             render_factor=args.render_factor, 
                             )

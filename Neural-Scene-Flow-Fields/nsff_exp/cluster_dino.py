@@ -98,14 +98,14 @@ def cluster_feats(root_dir, out_dir, load_size, stride, model_type, facet, layer
         sum_of_squared_dists = []
         n_cluster_range = list(range(1, n_cluster))
         for n_clu in tqdm(n_cluster_range):
-            algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+            algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=False, niter=300, nredo=10, seed=1234, verbose=False)
             algorithm.train(sampled_feature)
             squared_distances, labels = algorithm.index.search(feature, 1)
             objective = squared_distances.sum()
             sum_of_squared_dists.append(objective / feature.shape[0])
             if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):    
                 break
-        faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(out_dir, scene, "large.index")) 
+        faiss.write_index(algorithm.index, os.path.join(out_dir, scene, "large.index")) 
         num_labels = np.max(n_clu) + 1
         labels_per_image_no_merge_no_salient = np.split(labels, np.cumsum(num_samples_per_image))
 
@@ -202,7 +202,7 @@ def cluster_feats(root_dir, out_dir, load_size, stride, model_type, facet, layer
             feats = torch.nn.functional.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None)
             old_shape = feats.shape
             feats = feats.view(-1, feats.shape[-1])
-            pca = PCA(n_components=num_components).fit(feats.cpu())
+            #pca = PCA(n_components=num_components).fit(feats.cpu())
             pca_feats = pca.transform(feats.cpu())
             feats = pca_feats.reshape((old_shape[0], old_shape[1], old_shape[2], -1))
             feats = torch.nn.functional.interpolate(torch.from_numpy(feats).permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1)
@@ -785,10 +785,16 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    #root_dir = "../../data/test_data" 
-    #out_dir = "../../data/dino_masks_multi"  
-    #cluster_feats_multi(root_dir, out_dir, args.load_size, args.stride, args.model_type, args.facet, args.layer, args.bin, num_components=64)
-    #assert False
+    root_dir = "../../data/test_data" 
+    out_dir = "../../data/dino_masks"  
+    cluster_feats(root_dir, out_dir, args.load_size, args.stride, args.model_type, args.facet, args.layer, args.bin, num_components=64)
+    
+    assert False
+
+    root_dir = "../../data/test_data" 
+    out_dir = "../../data/dino_masks_multi"  
+    cluster_feats_multi(root_dir, out_dir, args.load_size, args.stride, args.model_type, args.facet, args.layer, args.bin, num_components=64)
+    assert False
     '''
     feats = load_feats(args.root_dir, sample_interval=100, max_cluster=args.max_cluster, elbow=0.975, use_gt_dino=args.use_gt_dino, use_gt_sal=args.use_gt_sal, depth_ratio=args.depth_ratio, pixel_ratio=args.pixel_ratio,
         pts_ratio=args.pts_ratio,

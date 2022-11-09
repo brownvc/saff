@@ -1656,6 +1656,7 @@ def cluster_2D(render_poses,
                      salient_labels=None,
                      label_mapper = None,
                      render_mode = False,
+                     no_merge = False,
                      savedir=None, 
                      render_factor=0, 
                      alpha_threshold=0.2,
@@ -1871,8 +1872,9 @@ def cluster_2D(render_poses,
     if render_mode:
         
         labels_per_image_no_merge_no_salient =[copy.deepcopy(item) for item in np.split(labels, np.cumsum(num_samples_per_image))]
-        for key in label_mapper:
-            labels[labels == key] = label_mapper[key]
+        if not no_merge:
+            for key in label_mapper:
+                labels[labels == key] = label_mapper[key]
         #labels_per_image_no_merge_no_salient = copy.deepcopy(labels_per_image)
         labels_per_image_no_salient = [copy.deepcopy(item) for item in np.split(labels, np.cumsum(num_samples_per_image))]
         labels[~np.isin(labels, salient_labels)] = -1
@@ -1943,7 +1945,8 @@ def cluster_2D(render_poses,
     # note: do it backwards! Let former clusters overwrite latter clusters
     
     '''turn off merging'''
-    #similarity_thresh = 1
+    if no_merge:
+        similarity_thresh = 1
 
     centroids = algorithm.centroids
     #centroids = np.linalg.norm(centroids, axis=0)

@@ -899,12 +899,15 @@ def train():
                 #index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
                 #                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
                 index = faiss.read_index(os.path.join(testsavedir, "large.index"))
+                #print("I am here!")
                 salient_labels = np.load(os.path.join(testsavedir, "salient.npy"))
+                #print("I am here!")
                 if not args.no_merge:
                     #assert label_mapper is not None
-                    label_mapper = pickle.load(open(os.path.join(testsavedir, "label_mapper.pkl")), "rb")
+                    label_mapper = pickle.load(open(os.path.join(testsavedir, "label_mapper.pkl"), "rb"))
                 else:
                     label_mapper = None
+                #print("I am here!")
             except:
                 index = None
                 salient_labels = None

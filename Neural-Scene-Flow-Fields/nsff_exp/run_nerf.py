@@ -57,6 +57,13 @@ def config_parser():
                         help="cluster point cloud in 3D ")
     parser.add_argument("--cluster_2D", action="store_true",
                         help="cluster on 2D rendered result ")
+    parser.add_argument("--cluster_2D_flow", action="store_true",
+                        help="cluster on 2D rendered result with optical flow")
+
+    parser.add_argument("--extract_2D", action="store_true",
+                        help="extract salient objects from field ")
+    parser.add_argument("--cluster_dir", type=str, default=None, 
+                        help="which cluster to use for extraction")
     parser.add_argument("--render_mode", action="store_true",
                         help="generation decomposition result")
     parser.add_argument("--no_merge", action="store_true",
@@ -409,6 +416,7 @@ def train():
             assert False, "visualize loaded feature image 0 and visualize loaded saliency image 0"
             '''
         elif args.use_multi_dino:
+            
             # a version of multiresolution
             assert args.dino_coe >0, "has to make sure dino is being used"
             assert args.prep_dino, "Has to make sure dim is small enough other wise explode cpu/gpu"
@@ -930,6 +938,139 @@ def train():
                             render_factor=args.render_factor, 
                             )
         return
+
+    if args.extract_2D:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('extract salient objects in 2D')
+        assert args.use_tanh, "Need to make sure dino feature falls in between -1 and 1"
+        assert (args.dino_coe > 0) and (args.sal_coe > 0), "must have both dino head and saliency head"
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        #assert False, render_poses.shape
+        #bt_poses = create_bt_poses(hwf) 
+        #bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'extract_2D-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        #if args.no_merge:
+        #    testsavedir += "_no_merge"
+            #assert False, testsavedir
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=args.n_cluster, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        #salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
+        
+            
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            #res = faiss.StandardGpuResources()
+            if True:
+                #index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                #                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+                index = faiss.read_index(os.path.join(args.cluster_dir, "large.index"))
+                #print("I am here!")
+                salient_labels = np.load(os.path.join(args.cluster_dir, "salient.npy"))
+                try:
+                    label_mapper = pickle.load(open(os.path.join(args.cluster_dir, "label_mapper.pkl"), "rb"))
+                except:
+                    label_mapper = None
+                
+            assert index is not None 
+            assert salient_labels is not None 
+                
+            extract_2D(render_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            dino_weight=args.dino_weight,
+                            flow_weight=args.flow_weight,
+                            index = index,
+                            salient_labels = salient_labels,
+                            label_mapper = label_mapper,
+                            render_mode = True,
+                            no_merge = label_mapper is None,
+                            savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            )
+        return
+    if args.cluster_2D_flow:
+        #assert False, "axis may be wrong due to saliency channel!!!"
+        print('cluster in 2D with flow')
+        assert args.use_tanh, "Need to make sure dino feature falls in between -1 and 1"
+        assert (args.dino_coe > 0) and (args.sal_coe > 0), "must have both dino head and saliency head"
+        curr_ts = 0
+        render_poses = poses #torch.Tensor(poses).to(device)
+        #assert False, render_poses.shape
+        #bt_poses = create_bt_poses(hwf) 
+        #bt_poses = bt_poses * 10
+        
+        testsavedir = os.path.join(basedir, expname, 
+                                'cluster_2D_flow-%03d'%\
+                                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        if args.no_merge:
+            testsavedir += "_no_merge"
+            #assert False, testsavedir
+        #assert False, testsavedir
+        os.makedirs(testsavedir, exist_ok=True)
+        #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
+        #assert False, [load_algo, n_clusters]
+        #assert False, feats[0].shape
+        
+        #algorithm = faiss.Kmeans(d=(3+feats[0].shape[-1]), k=args.n_cluster, niter=300, nredo=10)
+        #centroids = np.load(args.load_algo)
+        #sample_data = np.load(args.load_algo.replace('centroids', 'sample'))
+        #algorithm.centroids = centroids
+        #algorithm.train(sample_data.astype(np.float32), init_centroids=centroids) 
+        #assert np.sum(algorithm.centroids - centroids) == 0, "centroids are not the same"
+        #salient_labels = np.load(args.load_algo.replace('centroids', 'salient'))
+        
+            
+        with torch.no_grad():
+            #assert False, "parameters not decided!"
+            #res = faiss.StandardGpuResources()
+            try:
+                #index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                #                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+                index = faiss.read_index(os.path.join(testsavedir, "large.index"))
+                #print("I am here!")
+                salient_labels = np.load(os.path.join(testsavedir, "salient.npy"))
+                #print("I am here!")
+                if not args.no_merge:
+                    #assert label_mapper is not None
+                    label_mapper = pickle.load(open(os.path.join(testsavedir, "label_mapper.pkl"), "rb"))
+                else:
+                    label_mapper = None
+                #print("I am here!")
+            except:
+                index = None
+                salient_labels = None
+                label_mapper = None
+            if args.render_mode:
+                assert index is not None 
+                assert salient_labels is not None 
+                if not args.no_merge:
+                    assert label_mapper is not None
+            cluster_2D_flow(render_poses, 
+                            hwf, args.chunk, render_kwargs_test,
+                            dino_weight=args.dino_weight,
+                            flow_weight=args.flow_weight,
+                            index = index,
+                            salient_labels = salient_labels,
+                            label_mapper = label_mapper,
+                            render_mode = args.render_mode,
+                            no_merge = args.no_merge,
+                            savedir=testsavedir, 
+                            render_factor=args.render_factor, 
+                            )
+        return
     if args.render_2D:
         #assert False, "axis may be wrong due to saliency channel!!!"
         print('render in 2D')
@@ -1042,6 +1183,8 @@ def train():
                             render_factor=args.render_factor, 
                             target_idx=10)
         return
+    
+    
     if args.cluster_finch:
         #assert False, "axis may be wrong due to saliency channel!!!"
         print('cluster in finch 3D')

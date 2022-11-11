@@ -1646,6 +1646,223 @@ def cluster_pcd(render_poses,
             sim = np.dot(item_1, item_2) / (np.linalg.norm(item_1) * np.linalg.norm(item_2))
             print(c1, c2, sim)
     assert False, "Pause"
+def extract_2D(render_poses, 
+                     hwf, chunk, render_kwargs, 
+                     dino_weight,
+                     flow_weight,
+                     quant_index=None,
+                     index=None,
+                     salient_labels=None,
+                     label_mapper = None,
+                     render_mode = True,
+                     no_merge = False,
+                     savedir=None, 
+                     render_factor=0, 
+                     alpha_threshold=0.2,
+                     sample_interval=5,
+                     n_cluster=25,
+                     elbow=0.975,
+                     thresh=0.07,
+                     votes_percentage=70,
+                     similarity_thresh=0.5,
+                     blend_threshold = 0.1):
+    # import scipy.io
+    torch.manual_seed(0)
+    np.random.seed(0)
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    #save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    #save_cls_dir = os.path.join(savedir, 'cls')
+    os.makedirs(savedir, exist_ok=True)
+    #os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None,
+        "dinos": None,
+        "sals": None
+    }
+    
+
+    samples = {
+        "dinos": None,
+        "times": None,
+        "sals": None,
+        "points": None
+
+    }
+
+    if render_mode:
+        render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
+        #assert False, render_poses.shape
+        times = list(range(24)) + list(range(24)) + [0]*12
+    else:
+        assert False, "not allowed"
+        times = list(range(24))
+
+    num_img = 24.  
+    #num_img = 2
+    
+    '''store all non-opaque points and shuffle'''
+    ret = {}  
+    num_samples_per_image = []
+    samples = {}
+    saliency_maps_list = []
+    rgb_list = []
+    labels = None
+    for i in tqdm(range(render_poses.shape[0])):
+        cur_time = times[i]
+        #flow_time = int(np.floor(cur_time))
+        #ratio = cur_time - np.floor(cur_time)
+        #print('cur_time ', i, cur_time, ratio)
+        #t = time.time()
+
+        #int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+        #                                        render_poses[flow_time, :3, :3],
+        #                                        render_poses[flow_time + 1, :3, 3], 
+        #                                        render_poses[flow_time + 1, :3, :3], 
+        #                                        ratio)
+        int_rot = render_poses[i, :3, :3]
+        int_trans = render_poses[i, :3, 3]
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        img_idx_embed = cur_time/float(num_img) * 2. - 1.0
+        #img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        **render_kwargs)
+        for key in ret:
+            ret[key] = ret[key].cuda()
+        num_sample = ret['raw_rgb'].shape[2]
+        
+        tmp["T_i"] = torch.ones((1, H, W)).permute(1, 2, 0)
+        tmp["z_vals"] = ret["z_vals"]
+        tmp["final_depth"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_dino"] = torch.zeros((ret["raw_dino"].shape[-1], H, W)).permute(1, 2, 0)
+        tmp["final_blend"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_sal"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_rgb"] = torch.zeros((H, W, 3))
+        
+
+        #first segment based on cluster
+        tmp["current_dino"] = ret["raw_alpha"][..., None] * ret["raw_dino"]+\
+            ret["raw_alpha_rigid"][..., None] * ret["raw_dino_rigid"]
+        #print(tmp["current_dino"].shape)
+        tmp["current_dino"] = torch.nn.functional.normalize(tmp["current_dino"] * dino_weight, dim=-1).view(-1, tmp["current_dino"].shape[-1]).cpu().numpy().astype(np.float32)
+        #print(tmp["current_dino"].shape)
+        _, tmp["current_dino"] = index.search(tmp["current_dino"], 1)
+        if label_mapper is not None:
+            for key in label_mapper:
+                tmp["current_dino"][tmp["current_dino"] == key] = label_mapper[key]
+                #print("yes!")
+       
+        tmp["current_dino"] = np.isin(tmp["current_dino"], salient_labels)
+        #print(tmp["current_dino"].shape, np.unique(tmp["current_dino"]))
+        
+        
+        tmp["current_dino"] = torch.from_numpy(tmp["current_dino"].reshape((H, W, num_sample))).float().cuda()
+        #assert False, tmp["current_dino"].shape
+        # if segmentation result not in salient class, pass through this ray sample
+        #feature = torch.cat([
+        #    torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight
+        #    ], dim=-1).cpu().numpy().astype(np.float32)
+        #_, current_labels = index.search(feature, 1)
+        ret["raw_alpha"] *= tmp["current_dino"]
+        ret["raw_alpha_rigid"] *= tmp["current_dino"]
+        for j in tqdm(range(0, num_sample)):
+            #assert False, [ret["raw_alpha"].shape, ret["raw_dino"].shape]
+            
+
+
+            tmp["final_rgb"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_rgb"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_rgb_rigid"][..., j, :]
+            )
+            tmp["final_dino"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_dino"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_dino_rigid"][..., j, :]
+            )
+            tmp["final_sal"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_sal"][..., j, :] + 
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_sal_rigid"][..., j, :]
+            )
+            tmp["final_blend"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None]
+            )
+            tmp["alpha_final"] = 1.0 - \
+                (1.0 - ret["raw_alpha"][..., j, None]) * \
+                (1.0 - ret["raw_alpha_rigid"][..., j, None])
+            #assert False, tmp["z_vals"].shape
+            tmp["final_depth"] += tmp["T_i"] * tmp["alpha_final"] * tmp["z_vals"][..., j, None].cuda()
+            tmp["T_i"] = tmp["T_i"] * (1.0 - tmp["alpha_final"] + 1e-10)
+        
+        
+        if "raw_dino" in ret:
+            torch.save(tmp["final_dino"].cpu(), os.path.join(savedir, f"{i}_dino.pt"))
+        if "raw_sal" in ret:
+            cv2.imwrite(os.path.join(savedir, f"{i}_sal.png"), tmp["final_sal"].cpu().numpy()[..., 0]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_blend.png"), tmp["final_blend"].cpu().numpy()[..., 0]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_rgb.png"), tmp["final_rgb"].cpu().numpy()[..., [2, 1, 0]]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_depth.png"), tmp["final_depth"].cpu().numpy()[..., 0]*255.)
+        #print(torch.max(tmp["final_depth"]), torch.min(tmp["final_depth"]))
+        #assert False, "Pause"
+        
+        tmp["final_rgb"][tmp["final_blend"][..., 0] < blend_threshold, :] *= 0
+        tmp["final_depth"][tmp["final_blend"][..., 0] < blend_threshold, :] *= 0
+
+        #if "raw_dino" in ret:
+        #    torch.save(tmp["final_dino"].cpu(), os.path.join(savedir, f"{i}_dino_post.pt"))
+        #if "raw_sal" in ret:
+        #    cv2.imwrite(os.path.join(savedir, f"{i}_sal_post.png"), tmp["final_sal"].cpu().numpy()[..., 0]*255.)
+        #cv2.imwrite(os.path.join(savedir, f"{i}_blend_post.png"), tmp["final_blend"].cpu().numpy()[..., 0]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_rgb_post.png"), tmp["final_rgb"].cpu().numpy()[..., [2, 1, 0]]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_depth_post.png"), tmp["final_depth"].cpu().numpy()[..., 0]*255.)
+
+
+
+        
+        for key in tmp:
+            tmp[key] = None
+        for key in ret:
+            ret[key] = None
+        torch.cuda.empty_cache()
+        #assert False, "Pause to check first frame"
+
+        
+    assert False, "Pause"
 
 def cluster_2D(render_poses, 
                      hwf, chunk, render_kwargs, 
@@ -1989,6 +2206,462 @@ def cluster_2D(render_poses,
                 votes[label] += 1
     print(votes)
     salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
+    with open(os.path.join(savedir, "salient.npy"), "wb") as f:
+        np.save(f, salient_labels)
+
+    '''turn off saliency voting'''
+    #salient_labels = np.unique(labels)
+    
+       
+    
+
+    for idx, (rgb, image_labels, old_image_labels) in enumerate(zip(rgb_list, labels_per_image, old_labels_per_image)):
+        img_clu = -np.ones_like(image_labels).astype(int)
+        img_clu[np.isin(image_labels, salient_labels)] = image_labels[np.isin(image_labels, salient_labels)]
+        img_clu = d3_41_colors_rgb[img_clu.reshape((rgb.shape[0], rgb.shape[1]))]
+        img_bld = 0.5*rgb.cpu().numpy()[..., [2, 1, 0]]*255. + 0.5 * img_clu
+        img_bld[img_bld > 255.] = 255.
+        cv2.imwrite(os.path.join(savedir, f"{idx}_clu.png"),img_clu)
+        cv2.imwrite(os.path.join(savedir, f"{idx}_bld.png"),img_bld )
+        img_clu = d3_41_colors_rgb[image_labels.reshape((rgb.shape[0], rgb.shape[1]))]
+        img_bld = 0.5*rgb.cpu().numpy()[..., [2, 1, 0]]*255. + 0.5 * img_clu
+        img_bld[img_bld > 255.] = 255.
+        cv2.imwrite(os.path.join(savedir, f"{idx}_clu_full.png"),img_clu)
+        cv2.imwrite(os.path.join(savedir, f"{idx}_bld_full.png"),img_bld )
+        
+        img_clu = d3_41_colors_rgb[old_image_labels.reshape((rgb.shape[0], rgb.shape[1]))]
+        img_bld = 0.5*rgb.cpu().numpy()[..., [2, 1, 0]]*255. + 0.5 * img_clu
+        img_bld[img_bld > 255.] = 255.
+        cv2.imwrite(os.path.join(savedir, f"{idx}_clu_full_beforemerge.png"),img_clu)
+        cv2.imwrite(os.path.join(savedir, f"{idx}_bld_full_beforemerge.png"),img_bld )
+    
+    
+    assert False, "Pause"
+
+
+def cluster_2D_flow(render_poses, 
+                     hwf, chunk, render_kwargs, 
+                     dino_weight,
+                     flow_weight,
+                     quant_index=None,
+                     index=None,
+                     salient_labels=None,
+                     label_mapper = None,
+                     render_mode = False,
+                     no_merge = False,
+                     savedir=None, 
+                     render_factor=0, 
+                     alpha_threshold=0.2,
+                     sample_interval=5,
+                     n_cluster=25,
+                     elbow=0.975,
+                     thresh=0.07,
+                     thresh_flow=0.07,
+                     votes_percentage=70,
+                     similarity_thresh=0.5):
+    # import scipy.io
+    torch.manual_seed(0)
+    np.random.seed(0)
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+    #assert False, [H, W, focal]
+    t = time.time()
+
+    count = 0
+
+    #save_pcd_dir = os.path.join(savedir, 'pcds')
+    # save_depth_dir = os.path.join(savedir, 'depths')
+    #save_cls_dir = os.path.join(savedir, 'cls')
+    os.makedirs(savedir, exist_ok=True)
+    #os.makedirs(save_pcd_dir, exist_ok=True)
+    # os.makedirs(save_depth_dir, exist_ok=True)
+    tmp = {
+        "final_dino": None,
+        "final_cluster": None,
+        "z_vals": None,
+        "render_pose": None,
+        "R_w2t": None,
+        "t_w2t": None,
+        "alpha_final": None,
+        "points": None,
+        "dinos": None,
+        "sals": None
+    }
+    
+
+    samples = {
+        "dinos": None,
+        "times": None,
+        "sals": None,
+        "points": None
+
+    }
+
+    if render_mode:
+        render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
+        #assert False, render_poses.shape
+        times = list(range(24)) + list(range(24)) + [0]*12
+    else:
+        times = list(range(24))
+
+    num_img = 24
+    #num_img = 2
+    
+    '''store all non-opaque points and shuffle'''
+    ret = {}  
+    num_samples_per_image = []
+    samples = {}
+    saliency_maps_list = []
+    flow_post_list = []
+    flow_prev_list = []
+    rgb_list = []
+    labels = None
+    for i in tqdm(range(render_poses.shape[0])):
+        cur_time = times[i]
+        #flow_time = int(np.floor(cur_time))
+        #ratio = cur_time - np.floor(cur_time)
+        #print('cur_time ', i, cur_time, ratio)
+        #t = time.time()
+
+        #int_rot, int_trans = linear_pose_interp(render_poses[flow_time, :3, 3], 
+        #                                        render_poses[flow_time, :3, :3],
+        #                                        render_poses[flow_time + 1, :3, 3], 
+        #                                        render_poses[flow_time + 1, :3, :3], 
+        #                                        ratio)
+        int_rot = render_poses[i, :3, :3]
+        int_trans = render_poses[i, :3, 3]
+        int_poses = np.concatenate((int_rot, int_trans[:, np.newaxis]), 1)
+        int_poses = np.concatenate([int_poses[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
+
+        #int_poses = np.dot(int_poses, bt_poses[i])
+
+        tmp["render_pose"] = torch.Tensor(int_poses).to(device)
+
+        tmp["R_w2t"] = tmp["render_pose"][:3, :3].transpose(0, 1)
+        tmp["t_w2t"] = -torch.matmul(tmp["R_w2t"], tmp["render_pose"][:3, 3:4])
+        
+        img_idx_embed = cur_time/float(num_img) * 2. - 1.0
+        #img_idx_embed_1 = (np.floor(cur_time))/float(num_img) * 2. - 1.0
+        #img_idx_embed_2 = (np.floor(cur_time) + 1)/float(num_img) * 2. - 1.0
+
+        print('img_idx_embed ', cur_time, img_idx_embed)
+
+        ret = render_sm(img_idx_embed, 0, False,
+                        num_img, 
+                        H, W, focal, 
+                        chunk=1024*16, 
+                        c2w=tmp["render_pose"],
+                        return_sem=True,
+                        return_flow= not render_mode,
+                        **render_kwargs)
+        #assert False
+        for key in ret:
+            ret[key] = ret[key].cuda()
+        num_sample = ret['raw_rgb'].shape[2]
+        
+        tmp["T_i"] = torch.ones((1, H, W)).permute(1, 2, 0)
+        tmp["z_vals"] = ret["z_vals"]
+        tmp["final_depth"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_dino"] = torch.zeros((ret["raw_dino"].shape[-1], H, W)).permute(1, 2, 0)
+        tmp["final_blend"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_sal"] = torch.zeros((1, H, W)).permute(1, 2, 0)
+        tmp["final_rgb"] = torch.zeros((H, W, 3))
+        if not render_mode:
+            #tmp["pose_post"] = torch.Tensor(render_poses[max(0, i-1), :3, :4]).to(device)
+            tmp["pose_now"] = torch.Tensor(render_poses[i, :3, :4]).to(device)
+            #tmp["pose_prev"] = torch.Tensor(render_poses[min(render_poses.shape[0]-1, i+1), :3, :4]).to(device)
+            tmp["final_post"], tmp["final_prev"] = compute_optical_flow(tmp["pose_now"], \
+                tmp["pose_now"], tmp["pose_now"],
+                H, W, focal, ret)
+            tmp["flow_anchor"] = torch.zeros((H, W, 2))
+            #tmp["flow_post_x"]: HxW
+            #   [[0, 0, ..., 0],
+            #    [1, 1, ..., 1],
+            #     ...
+            #    [H-1, H-1, ...H-1]
+            #    ]
+            #tmp["flow_post_y"]: HxW
+            #   [[0, 1, ..., W-1],
+            #    [0, 1, ..., W-1],
+            #     ...
+            #    [0, 1, ...W-1]
+            #    ]
+            tmp["flow_anchor"][..., 1], tmp["flow_anchor"][..., 0] = torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W), indexing='ij')
+            #assert False, [tmp["flow_anchor"].shape, tmp["flow_anchor"][:3, :3], tmp["flow_anchor"][-3:, -3:]]
+            #tmp["flow_prev"] = torch.zeros((H, W, 2))
+            #assert False, (tmp["final_prev"][:3, :3], tmp["final_prev"][-3:,-3:])
+            tmp["final_post"] -= tmp["flow_anchor"]
+            tmp["final_prev"] -= tmp["flow_anchor"]
+            
+            '''
+            hsv = np.zeros((H, W, 3), dtype=np.uint8)
+            hsv[..., 1] = 255
+            mag, ang = cv2.cartToPolar(tmp["final_prev"][..., 0].cpu().numpy(), tmp["final_prev"][..., 1].cpu().numpy())
+            hsv[..., 0] = ang * 180 / np.pi / 2
+            hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            cv2.imwrite("test_prev.png", bgr)
+
+            hsv = np.zeros((H, W, 3), dtype=np.uint8)
+            hsv[..., 1] = 255
+            mag, ang = cv2.cartToPolar(tmp["final_post"][..., 0].cpu().numpy(), tmp["final_post"][..., 1].cpu().numpy())
+            hsv[..., 0] = ang * 180 / np.pi / 2
+            hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            cv2.imwrite("test_post.png", bgr)
+
+            assert False, [torch.max(tmp["final_prev"]), torch.min(tmp["final_prev"]), tmp["final_prev"].shape, tmp["final_post"].shape,
+            torch.max(tmp["final_post"]), torch.min(tmp["final_post"]), tmp["final_prev"].shape, tmp["final_post"].shape,
+            tmp["final_post"][:3, :2], (tmp["flow_anchor"]+tmp["final_post"])[:3, :2],
+            tmp["final_post"][-3:, -2:], (tmp["flow_anchor"]+tmp["final_post"])[-3:, -2:],
+             tmp["final_prev"][:3, :2], (tmp["flow_anchor"]+tmp["final_prev"])[:3, :2],
+             tmp["final_prev"][-3:, -2:], (tmp["flow_anchor"]+tmp["final_prev"])[-3:, -2:],
+            ]
+            '''
+            tmp["final_post"], _ = cv2.cartToPolar(tmp["final_post"][..., 0].cpu().numpy(), tmp["final_post"][..., 1].cpu().numpy())
+            tmp["final_post"] = torch.from_numpy(cv2.normalize(tmp["final_post"], None, 0, 255, cv2.NORM_MINMAX).astype(float))/255.
+
+            tmp["final_prev"], _ = cv2.cartToPolar(tmp["final_prev"][..., 0].cpu().numpy(), tmp["final_prev"][..., 1].cpu().numpy())
+            tmp["final_prev"] = torch.from_numpy(cv2.normalize(tmp["final_prev"], None, 0, 255, cv2.NORM_MINMAX).astype(float))/255.
+
+            '''
+            cv2.imwrite("test_post.png", tmp["final_post"].numpy()*255.)
+            cv2.imwrite("test_prev.png", tmp["final_prev"].numpy()*255.)
+            assert False
+            '''
+            
+        for j in tqdm(range(0, num_sample)):
+            #assert False, [ret["raw_alpha"].shape, ret["raw_dino"].shape]
+            tmp["final_rgb"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_rgb"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_rgb_rigid"][..., j, :]
+            )
+            tmp["final_dino"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_dino"][..., j, :] +
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_dino_rigid"][..., j, :]
+            )
+            tmp["final_sal"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None] * ret["raw_sal"][..., j, :] + 
+                ret["raw_alpha_rigid"][..., j, None] * ret["raw_sal_rigid"][..., j, :]
+            )
+            tmp["final_blend"] += tmp["T_i"] * (
+                ret["raw_alpha"][..., j, None]
+            )
+            tmp["alpha_final"] = 1.0 - \
+                (1.0 - ret["raw_alpha"][..., j, None]) * \
+                (1.0 - ret["raw_alpha_rigid"][..., j, None])
+            #assert False, tmp["z_vals"].shape
+            tmp["final_depth"] += tmp["T_i"] * tmp["alpha_final"] * tmp["z_vals"][..., j, None].cuda()
+            tmp["T_i"] = tmp["T_i"] * (1.0 - tmp["alpha_final"] + 1e-10)
+        '''
+        # visualize dino image
+        pca = PCA(n_components=3).fit(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
+        pca_feats = pca.transform(tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1]).cpu().numpy())
+        pca_feats = pca_feats.reshape((tmp["final_dino"].shape[0], tmp["final_dino"].shape[1], pca_feats.shape[-1]))
+        for comp_idx in range(3):
+            comp = pca_feats[:, :, comp_idx]
+            comp_min = comp.min(axis=(0, 1))
+            comp_max = comp.max(axis=(0, 1))
+            comp_img = (comp - comp_min) / (comp_max - comp_min)
+            pca_feats[..., comp_idx] = comp_img
+        cv2.imwrite("test.png", pca_feats * 255.)
+        
+        assert False, "Pause"
+        '''
+        # blur saliency
+        #tmp["final_sal"] = torch.nn.functional.interpolate(kornia.filters.blur_pool2d(tmp["final_sal"][None, ...].permute(0, 3, 1, 2), 3), (tmp["final_blend"].shape[0], tmp["final_blend"].shape[1]))[0].permute(1,2, 0)
+        #assert False, [tmp["final_blend"].shape, tmp["final_sal"].shape]
+        th = 0.1
+        th = torch.quantile(torch.unique(tmp["final_sal"]), 0.9)
+        th2 = torch.quantile(torch.unique(tmp["final_blend"]), 1)
+        th3 = torch.quantile(torch.unique(tmp["final_sal"]), 0.)
+        result = tmp["final_blend"]*(((tmp["final_sal"]>th) | (tmp["final_blend"] > th2)) & (tmp["final_sal"]>th3))
+        result = tmp["final_blend"]
+        th4 = torch.quantile(torch.unique(tmp["final_sal"]), 0.5)
+        th4 = 0.05
+        result[tmp["final_sal"] < th4] = 0
+        result = tmp["final_sal"] 
+        #result = torch.nn.functional.interpolate(kornia.filters.gaussian_blur2d(result[None, ...].permute(0, 3, 1, 2), (3,3), (1.5, 1.5)), (tmp["final_blend"].shape[0], tmp["final_blend"].shape[1]))[0].permute(1,2, 0)
+        #cv2.imwrite("test.png", result.cpu().numpy()*255.)
+        #assert False, th4
+        #saliency_map = result
+        #assert False, [ret["rays_o"][...,None,:].shape, tmp["final_depth"].shape, tmp["final_depth"].permute(1, 2, 0)[..., None].shape]
+        tmp["points"] = ret["rays_o"] + ret["rays_d"] * tmp["final_depth"]
+        tmp["times"] = torch.ones_like(tmp["final_sal"]) * img_idx_embed
+        
+        num_samples_per_image.append(tmp["times"].shape[0] * tmp["times"].shape[1])
+        
+        if i == 0 or samples["dinos"] is None:
+            samples["dinos"] = tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1])
+            samples["sals"] = tmp["final_sal"].view(-1, 1)
+            samples["points"] = tmp["points"].view(-1, 3)
+            samples["times"] = tmp["times"].view(-1, 1)
+            #if not render_mode:
+            #    samples["flow_posts"] = tmp["final_post"].view(-1, 1)
+            #    samples["flow_prevs"] = tmp["final_prev"].view(-1, 1)
+        else:
+            samples["dinos"] = torch.cat([samples["dinos"], tmp["final_dino"].view(-1, tmp["final_dino"].shape[-1])], dim=0)
+            samples["sals"] = torch.cat([samples["sals"], tmp["final_sal"].view(-1, 1)], dim=0)
+            samples["points"] = torch.cat([samples["points"], tmp["points"].view(-1, 3)], dim=0)
+            samples["times"] = torch.cat([samples["times"], tmp["times"].view(-1, 1)], dim=0)
+            #if not render_mode:
+            #    samples["flow_posts"] = torch.cat([samples["flow_posts"], tmp["final_post"].view(-1, 1)], dim=0)
+            #    samples["flow_prevs"] = torch.cat([samples["flow_prevs"], tmp["final_prev"].view(-1, 1)], dim=0)
+        saliency_maps_list.append(result.view(-1, 1))
+        if not render_mode:
+            flow_post_list.append(tmp["final_post"].view(-1, 1))
+            flow_prev_list.append(tmp["final_prev"].view(-1, 1))
+        rgb_list.append(tmp["final_rgb"])
+        for key in tmp:
+            tmp[key] = None
+        for key in ret:
+            ret[key] = None
+        torch.cuda.empty_cache()
+
+        if render_mode and ((i==render_poses.shape[0] -1) or (i % 20 == 19)):
+            feature = torch.cat([
+                torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight
+                ], dim=-1).cpu().numpy().astype(np.float32)
+            _, current_labels = index.search(feature, 1)
+            #assert False, current_labels.shape
+            if labels is None:
+                labels = current_labels
+            else:
+                labels = np.concatenate([labels, current_labels], axis=0)
+
+            for key in samples:
+                samples[key] = None
+
+    
+
+    if render_mode:
+        
+        labels_per_image_no_merge_no_salient =[copy.deepcopy(item) for item in np.split(labels, np.cumsum(num_samples_per_image))]
+        if not no_merge:
+            for key in label_mapper:
+                labels[labels == key] = label_mapper[key]
+        #labels_per_image_no_merge_no_salient = copy.deepcopy(labels_per_image)
+        labels_per_image_no_salient = [copy.deepcopy(item) for item in np.split(labels, np.cumsum(num_samples_per_image))]
+        labels[~np.isin(labels, salient_labels)] = -1
+        labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+        
+        def write_label_image(img_clu, idx, name):
+            #img_clu = -np.ones_like(image_labels).astype(int)
+            #img_clu[np.isin(image_labels, salient_labels)] = image_labels[np.isin(image_labels, salient_labels)]
+            img_clu = d3_41_colors_rgb[img_clu.reshape((rgb_list[0].shape[0], rgb_list[0].shape[1]))]
+            cv2.imwrite(os.path.join(savedir, name, f"{idx}.png"),img_clu)
+
+        os.makedirs(os.path.join(savedir, "no_merge_no_salient"), exist_ok=True)
+        os.makedirs(os.path.join(savedir, "no_salient"), exist_ok=True)
+        os.makedirs(os.path.join(savedir, "final"), exist_ok=True)
+
+        for idx, (rgb, image_labels_no_merge_no_salient, image_labels_no_salient, final_labels) in enumerate(zip(rgb_list, labels_per_image_no_merge_no_salient, labels_per_image_no_salient, labels_per_image)):
+            write_label_image(image_labels_no_merge_no_salient, idx, "no_merge_no_salient")
+            write_label_image(image_labels_no_salient, idx, "no_salient")
+            write_label_image(final_labels, idx, "final")
+        
+        return
+    feature = torch.cat([
+        torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight,
+        #torch.nn.functional.normalize(torch.cat([samples["points"]], dim=-1), dim=-1),
+        #samples["times"],
+    ], dim=-1).cpu().numpy().astype(np.float32)
+    sampled_feature = np.ascontiguousarray(feature[::sample_interval])
+    '''
+    #sampled_feature = feature[torch.cat(saliency_maps_list, dim=0).view(-1).cpu().numpy() > 0, :]
+    is_bg_coords = torch.cat(saliency_maps_list, dim=0).view(-1).cpu().numpy() <= 0
+    #fg_ratio = np.sum(is_bg_coords) / float(len(feature))
+    #assert False, fg_ratio
+    #print(np.sum(is_bg_coords) / float(len(feature)))
+    
+    #fg_ratio = 0.5
+    fg_ratio = 1- np.sum(is_bg_coords) / float(len(feature)) # turn off fg sampling
+    
+    fg_indices = np.random.choice(np.sum(~is_bg_coords), size=min(np.sum(~is_bg_coords), int(feature.shape[0]//sample_interval * fg_ratio)), replace=False)
+    bg_indices = np.random.choice(np.sum(is_bg_coords), size=min(np.sum(is_bg_coords), int(len(fg_indices)*(1.-fg_ratio)/fg_ratio)) , replace=False)
+    sampled_feature = np.concatenate([
+        feature[~is_bg_coords, :][fg_indices],
+        feature[is_bg_coords, :][bg_indices]
+        ], axis=0)
+    #print(f"{np.sum(~is_bg_coords)} foreground samples, {sampled_feature.shape[0] - np.sum(~is_bg_coords)} background samples")
+    #sampled_feature = feature[indices]
+    #assert False, [feature.shape[0]//sample_interval, sampled_feature.shape, np.sum(is_bg_coords), np.sum(~is_bg_coords), feature.shape[0]//sample_interval - np.sum(~is_bg_coords)]
+    '''
+
+    sum_of_squared_dists = []
+    n_cluster_range = list(range(1, n_cluster))
+    for n_clu in tqdm(n_cluster_range):
+        #algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=True, niter=300, nredo=10, seed=1234, verbose=False)
+        algorithm = faiss.Kmeans(d=feature.shape[-1], k=n_clu, gpu=False, niter=300, nredo=10, seed=1234, verbose=False)
+        algorithm.train(sampled_feature)
+        squared_distances, labels = algorithm.index.search(feature, 1)
+        objective = squared_distances.sum()
+        sum_of_squared_dists.append(objective / feature.shape[0])
+        if (len(sum_of_squared_dists) > 1 and sum_of_squared_dists[-1] > elbow * sum_of_squared_dists[-2]):    
+            break
+            #pass
+    #faiss.write_index(faiss.index_gpu_to_cpu(algorithm.index), os.path.join(savedir, "large.index")) 
+    faiss.write_index(algorithm.index, os.path.join(savedir, "large.index")) 
+    
+    num_labels = np.max(n_clu) + 1
+    labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+    
+    # merge clusters
+    # note: do it backwards! Let former clusters overwrite latter clusters
+    
+    '''turn off merging'''
+    if no_merge:
+        similarity_thresh = 1
+
+    centroids = algorithm.centroids
+    #centroids = np.linalg.norm(centroids, axis=0)
+    #assert False, centroids.shape
+    sims = -np.ones((len(centroids), len(centroids)))
+    assert samples["dinos"].shape[-1] == 64
+    for c1 in range(len(centroids)):
+        item_1 = centroids[c1][:64]
+        for c2 in range(c1+1, len(centroids)):
+            item_2 = centroids[c2][:64]
+            sims[c1, c2] = np.dot(item_1, item_2) / (np.linalg.norm(item_1) * np.linalg.norm(item_2))
+            print(c1, c2, sims[c1, c2])
+    label_mapper = {} 
+    print(salient_labels)       
+    for c2 in range(len(centroids)):
+        for c1 in range(c2):
+            if sims[c1, c2] > similarity_thresh:
+                label_mapper[c2] = c1
+                break    
+    pickle.dump(label_mapper, open(os.path.join(savedir, "label_mapper.pkl"), 'wb'))
+    #assert False
+    #print(np.unique(labels))
+    for key in label_mapper:
+        print(key, label_mapper[key])
+    old_labels_per_image = copy.deepcopy(labels_per_image)
+    for c1 in range(len(centroids)):
+        key = len(centroids) - c1 - 1
+        if key in label_mapper:
+            labels[labels == key] = label_mapper[key]
+    #assert False, [np.unique(labels), label_mapper]
+    #print(labels)
+    
+    labels_per_image = np.split(labels, np.cumsum(num_samples_per_image))
+
+    votes = np.zeros(num_labels)
+    for image_labels, saliency_map, post_map, prev_map in zip(labels_per_image, saliency_maps_list, flow_post_list, flow_prev_list):
+        for label in range(num_labels):
+            label_saliency = saliency_map[image_labels[:, 0] == label].mean()
+            label_flow = np.maximum(post_map, prev_map)[image_labels[:, 0] == label].mean()
+            if label_saliency > thresh and label_flow > thresh_flow:
+                votes[label] += 1
+    print(votes)
+    salient_labels = np.where(votes >= np.ceil(num_img * votes_percentage / 100))
+    
+    
     with open(os.path.join(savedir, "salient.npy"), "wb") as f:
         np.save(f, salient_labels)
 
@@ -2712,7 +3385,8 @@ def render_rays_sm(img_idx,
                 verbose=False,
                 pytest=False,
                 inference=True,
-                return_sem=False):
+                return_sem=False,
+                return_flow=False):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -2862,6 +3536,17 @@ def render_rays_sm(img_idx,
     else:
         for k in ret:
             ret[k] = ret[k].cpu()
+    
+    if return_flow:
+        ret["raw_pts_post"] = pts_ref[:, :, :3] + raw_sf_ref2post
+        ret["raw_pts_prev"] = pts_ref[:, :, :3] + raw_sf_ref2prev
+        _, _, _, _, _, _, _, _,ret['weights_ref_dy'], _ = raw2outputs_blending(raw_sal_ref, raw_dino_ref, raw_sal_rigid, raw_dino_rigid,
+                                          raw_rgba_ref, raw_rgba_rigid,
+                                          raw_blend_w,
+                                          z_vals, rays_d, 
+                                          raw_noise_std)
+
+    
     torch.cuda.empty_cache()
     return ret
 

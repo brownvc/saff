@@ -382,10 +382,10 @@ def train():
                 pca_feats[..., comp_idx] = comp_img
             cv2.imwrite("test_gt.png", pca_feats * 255.)
             assert False
-            
+            '''
             cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
             assert False
-            '''
+            
             print("Loaded dino features ", feats.shape)
             start = None
             pca = None

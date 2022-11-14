@@ -1837,11 +1837,14 @@ def extract_2D(render_poses,
         cv2.imwrite(os.path.join(savedir, f"{i}_blend.png"), tmp["final_blend"].cpu().numpy()[..., 0]*255.)
         cv2.imwrite(os.path.join(savedir, f"{i}_rgb.png"), tmp["final_rgb"].cpu().numpy()[..., [2, 1, 0]]*255.)
         cv2.imwrite(os.path.join(savedir, f"{i}_depth.png"), tmp["final_depth"].cpu().numpy()[..., 0]*255.)
+        cv2.imwrite(os.path.join(savedir, f"{i}_alpha.png"), tmp["alpha_final"].cpu().numpy()[..., 0]*255.)
         #print(torch.max(tmp["final_depth"]), torch.min(tmp["final_depth"]))
         #assert False, "Pause"
         
+        '''
         tmp["final_rgb"][tmp["final_blend"][..., 0] < blend_threshold, :] *= 0
         tmp["final_depth"][tmp["final_blend"][..., 0] < blend_threshold, :] *= 0
+        tmp["alpha_final"][tmp["final_blend"][..., 0] < blend_threshold, :] = 1
 
         #if "raw_dino" in ret:
         #    torch.save(tmp["final_dino"].cpu(), os.path.join(savedir, f"{i}_dino_post.pt"))
@@ -1850,7 +1853,8 @@ def extract_2D(render_poses,
         #cv2.imwrite(os.path.join(savedir, f"{i}_blend_post.png"), tmp["final_blend"].cpu().numpy()[..., 0]*255.)
         cv2.imwrite(os.path.join(savedir, f"{i}_rgb_post.png"), tmp["final_rgb"].cpu().numpy()[..., [2, 1, 0]]*255.)
         cv2.imwrite(os.path.join(savedir, f"{i}_depth_post.png"), tmp["final_depth"].cpu().numpy()[..., 0]*255.)
-
+        cv2.imwrite(os.path.join(savedir, f"{i}_alpha_post.png"), tmp["alpha_final"].cpu().numpy()[..., 0]*255.)
+        '''
 
 
         

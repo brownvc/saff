@@ -68,6 +68,10 @@ def config_parser():
                         help="generation decomposition result")
     parser.add_argument("--no_merge", action="store_true",
                         help="no merge step")
+    parser.add_argument("--use_pos", action="store_true",
+                        help="use position as input in clustering")
+    parser.add_argument("--use_time", action="store_true",
+                        help="use time as input in clustering")                    
     parser.add_argument("--cluster_finch", action="store_true", help="cluster point cloud in 3D finch")
     parser.add_argument("--load_algo", type=str,
                         help="clustering algorithm to use")
@@ -886,6 +890,10 @@ def train():
             testsavedir += "_no_merge"
             #assert False, testsavedir
         #assert False, testsavedir
+        if args.use_pos:
+            testsavedir += "_pos"
+        if args.use_time:
+            testsavedir += "_time"
         os.makedirs(testsavedir, exist_ok=True)
         #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
         #assert False, [load_algo, n_clusters]
@@ -934,6 +942,8 @@ def train():
                             label_mapper = label_mapper,
                             render_mode = args.render_mode,
                             no_merge = args.no_merge,
+                            use_pos = args.use_pos,
+                            use_time = args.use_time,
                             savedir=testsavedir, 
                             render_factor=args.render_factor, 
                             )

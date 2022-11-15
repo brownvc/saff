@@ -1878,6 +1878,8 @@ def cluster_2D(render_poses,
                      label_mapper = None,
                      render_mode = False,
                      no_merge = False,
+                     use_pos = False,
+                     use_time = False,
                      savedir=None, 
                      render_factor=0, 
                      alpha_threshold=0.2,
@@ -2078,6 +2080,16 @@ def cluster_2D(render_poses,
             feature = torch.cat([
                 torch.nn.functional.normalize(samples["dinos"], dim=-1) * dino_weight
                 ], dim=-1).cpu().numpy().astype(np.float32)
+            if use_pos:
+                feature = np.concatenate([
+                    feature,
+                    torch.nn.functional.normalize(samples["points"], dim=-1).cpu().numpy().astype(np.float32)
+                ], axis=-1)
+            if use_time:
+                feature = np.concatenate([
+                    feature,
+                    torch.nn.functional.normalize(samples["times"], dim=-1).cpu().numpy().astype(np.float32)
+                ], axis=-1)
             _, current_labels = index.search(feature, 1)
             #assert False, current_labels.shape
             if labels is None:
@@ -2122,6 +2134,16 @@ def cluster_2D(render_poses,
         #torch.nn.functional.normalize(torch.cat([samples["points"]], dim=-1), dim=-1),
         #samples["times"],
     ], dim=-1).cpu().numpy().astype(np.float32)
+    if use_pos:
+        feature = np.concatenate([
+            feature,
+            torch.nn.functional.normalize(samples["points"], dim=-1).cpu().numpy().astype(np.float32)
+        ], axis=-1)
+    if use_time:
+        feature = np.concatenate([
+            feature,
+            torch.nn.functional.normalize(samples["times"], dim=-1).cpu().numpy().astype(np.float32)
+        ], axis=-1)
     sampled_feature = np.ascontiguousarray(feature[::sample_interval])
     '''
     #sampled_feature = feature[torch.cat(saliency_maps_list, dim=0).view(-1).cpu().numpy() > 0, :]

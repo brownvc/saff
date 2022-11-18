@@ -20,3 +20,4 @@ benchmarks/*.png
 benchmarks/__pycache__/*
 dino_utils/*.png
 dino_utils/*.pt
+webpage/resource/*

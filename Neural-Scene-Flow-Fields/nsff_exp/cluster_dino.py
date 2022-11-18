@@ -90,9 +90,26 @@ def cluster_feats(root_dir, out_dir, load_size, stride, model_type, facet, layer
         pca_feats = pca.transform(feats.cpu())
         feats = pca_feats.reshape((old_shape[0], old_shape[1], old_shape[2], -1))
         feats = torch.nn.functional.interpolate(torch.from_numpy(feats).permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1)
+        pca_color = PCA(n_components=3).fit(feats.view(-1, feats.shape[-1]).cpu().numpy())
+        #print("I am done")
+        pca_feats = pca_color.transform(feats.view(-1, feats.shape[-1]).cpu().numpy())
+        #print("I am done")
+        pca_feats = pca_feats.reshape((-1, H, W, pca_feats.shape[-1]))
+        for comp_idx in range(3):
+            comp = pca_feats[..., comp_idx]
+            comp_min = comp.min(axis=(0, 1))
+            comp_max = comp.max(axis=(0, 1))
+            comp_img = (comp - comp_min) / (comp_max - comp_min)
+            pca_feats[..., comp_idx] = comp_img
+        
         feats = torch.nn.functional.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).numpy()
         sals = torch.nn.functional.interpolate(sals.permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1).view(sals.shape[0], -1)
-            
+
+        
+        for save_id in range(len(pca_feats)):
+            cv2.imwrite(os.path.join(out_dir, scene, f"train_feat_{save_id}.png"), pca_feats[save_id] * 255.)
+            cv2.imwrite(os.path.join(out_dir, scene, f"train_sal_{save_id}.png"), sals.view(-1, H, W).cpu().numpy()[save_id] * 255.)
+        #assert False, "Pause and modify below"
         feature = feats.reshape((-1, num_components)).astype(np.float32)
         sampled_feature = np.ascontiguousarray(feature[::sample_interval])   
         sum_of_squared_dists = []
@@ -206,9 +223,30 @@ def cluster_feats(root_dir, out_dir, load_size, stride, model_type, facet, layer
             pca_feats = pca.transform(feats.cpu())
             feats = pca_feats.reshape((old_shape[0], old_shape[1], old_shape[2], -1))
             feats = torch.nn.functional.interpolate(torch.from_numpy(feats).permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1)
+            
+            #pca_color = PCA(n_components=3).fit(feats.view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca_color.transform(feats.view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca_feats.reshape((-1, H, W, pca_feats.shape[-1]))
+            for comp_idx in range(3):
+                comp = pca_feats[..., comp_idx]
+                comp_min = comp.min(axis=(0, 1))
+                comp_max = comp.max(axis=(0, 1))
+                comp_img = (comp - comp_min) / (comp_max - comp_min)
+                pca_feats[..., comp_idx] = comp_img
+            
             feats = torch.nn.functional.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).numpy()
             sals = torch.nn.functional.interpolate(sals.permute(0, 3, 1, 2), (H, W), mode="nearest").permute(0, 2, 3, 1).view(sals.shape[0], -1)
+
             
+            for save_id in range(len(pca_feats)):
+                cv2.imwrite(os.path.join(out_dir, scene, f"{split}_feat_{save_id}.png"), pca_feats[save_id] * 255.)
+                cv2.imwrite(os.path.join(out_dir, scene, f"{split}_sal_{save_id}.png"), sals.view(-1, H, W).cpu().numpy()[save_id] * 255.)
+            #assert False, "Pause and modify below"
+            
+            
+
             feature = feats.reshape((-1, num_components)).astype(np.float32)
             _, labels = algorithm.index.search(feature, 1)
 
@@ -319,7 +357,7 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
         for [image_id, start_height, start_width, end_height, end_width] in tqdm(coords):
             batch = images[image_id:image_id+1, start_height:end_height, start_width:end_width]
             batch = torch.tensor(batch).permute(0, 3, 1, 2).float()
-            batch = F.interpolate(batch, size=(dheight, dwidth), mode='area')
+            batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
             with torch.no_grad():
                 feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
                 feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
@@ -353,22 +391,23 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
         feats = [pca.transform(feat) for feat in feats]
         feats = torch.from_numpy(np.concatenate(feats, axis=0)).view(images.shape[0], images.shape[1], images.shape[2], -1)
         #assert False, [len(num_patches_list), pca_feats.shape]
-        '''
-        pca = PCA(n_components=3).fit(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+        
+        pca_color = PCA(n_components=3).fit(feats.view(-1, feats.shape[-1]).cpu().numpy())
         #print("I am done")
-        pca_feats = pca.transform(feats[0].view(-1, feats.shape[-1]).cpu().numpy())
+        pca_feats = pca_color.transform(feats.view(-1, feats.shape[-1]).cpu().numpy())
         #print("I am done")
-        pca_feats = pca_feats.reshape((images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
+        pca_feats = pca_feats.reshape((-1, images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
         for comp_idx in range(3):
-            comp = pca_feats[:, :, comp_idx]
+            comp = pca_feats[..., comp_idx]
             comp_min = comp.min(axis=(0, 1))
             comp_max = comp.max(axis=(0, 1))
             comp_img = (comp - comp_min) / (comp_max - comp_min)
             pca_feats[..., comp_idx] = comp_img
-        cv2.imwrite("test_gt.png", pca_feats * 255.)
-        cv2.imwrite("test_sal.png", sals.numpy()[0] * 255.)
-        assert False
-        '''
+        for save_id in range(len(pca_feats)):
+            cv2.imwrite(os.path.join(out_dir, scene, f"train_feat_{save_id}.png"), pca_feats[save_id] * 255.)
+            cv2.imwrite(os.path.join(out_dir, scene, f"train_sal_{save_id}.png"), sals.view(-1, images.shape[1], images.shape[2]).numpy()[save_id] * 255.)
+        #assert False
+        
         feature = F.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).view(-1, num_components).numpy().astype(np.float32)        
         sampled_feature = np.ascontiguousarray(feature[::sample_interval])   
         sum_of_squared_dists = []
@@ -512,7 +551,7 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
             for [image_id, start_height, start_width, end_height, end_width] in tqdm(coords):
                 batch = images[image_id:image_id+1, start_height:end_height, start_width:end_width]
                 batch = torch.tensor(batch).permute(0, 3, 1, 2).float()
-                batch = F.interpolate(batch, size=(dheight, dwidth), mode='area')
+                batch = F.interpolate(batch, size=(dheight, dwidth), mode='nearest')
                 with torch.no_grad():
                     feat_raw = extractor.extract_descriptors(batch.to(device), args.layer, args.facet, args.bin)
                     feat_raw = feat_raw.view(batch.shape[0], extractor.num_patches[0], extractor.num_patches[1], -1).permute(0, 3, 1, 2)
@@ -545,6 +584,20 @@ def cluster_feats_multi(root_dir, out_dir, load_size, stride, model_type, facet,
             #print("I am done")
             feats = [pca.transform(feat) for feat in feats]
             feats = torch.from_numpy(np.concatenate(feats, axis=0)).view(images.shape[0], images.shape[1], images.shape[2], -1)
+            
+            pca_feats = pca_color.transform(feats.view(-1, feats.shape[-1]).cpu().numpy())
+            #print("I am done")
+            pca_feats = pca_feats.reshape((-1, images[0].shape[0], images[0].shape[1], pca_feats.shape[-1]))
+            for comp_idx in range(3):
+                comp = pca_feats[..., comp_idx]
+                comp_min = comp.min(axis=(0, 1))
+                comp_max = comp.max(axis=(0, 1))
+                comp_img = (comp - comp_min) / (comp_max - comp_min)
+                pca_feats[..., comp_idx] = comp_img
+            for save_id in range(len(pca_feats)):
+                cv2.imwrite(os.path.join(out_dir, scene, f"{split}_feat_{save_id}.png"), pca_feats[save_id] * 255.)
+                cv2.imwrite(os.path.join(out_dir, scene, f"{split}_sal_{save_id}.png"), sals.view(-1, images.shape[1], images.shape[2]).numpy()[save_id] * 255.)
+            
             #assert False, [len(num_patches_list), pca_feats.shape]
             feature = F.normalize(feats, p=2.0, dim=-1, eps=1e-12, out=None).view(-1, num_components).numpy().astype(np.float32)
             #feature = feats.reshape((-1, num_components)).astype(np.float32)

@@ -9,6 +9,7 @@ from skimage.measure import label, regionprops, regionprops_table
 import os
 import copy
 from tqdm import tqdm
+import cv2
 
 #https://medium.com/swlh/image-processing-with-python-connected-components-and-region-labeling-3eef1864b951
 
@@ -37,7 +38,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(out_dir, scene), exist_ok=True)
         image_id = 0
         while os.path.exists(os.path.join(root_dir, scene, f"{image_id}.png")):
-            img = imread(os.path.join(root_dir, scene, f"{image_id}.png"))
+            img = cv2.imread(os.path.join(root_dir, scene, f"{image_id}.png"))
             #assert False, imsave("test.png", img)
             #assert False, img.shape
             #(288, 54x, 3)
@@ -118,6 +119,6 @@ if __name__ == "__main__":
                 tmp[img == idx] = color
             tmp[to_collapse, :] *= 0 
             #assert False, imsave("test.png", tmp)
-            imsave(os.path.join(out_dir, scene, f"{image_id}.png"), tmp)
+            cv2.imwrite(os.path.join(out_dir, scene, f"{image_id}.png"), tmp)
             image_id += 1
 

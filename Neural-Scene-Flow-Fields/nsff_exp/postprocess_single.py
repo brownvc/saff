@@ -9,7 +9,7 @@ from skimage.measure import label, regionprops, regionprops_table
 import os
 import copy
 from tqdm import tqdm
-
+import cv2
 #https://medium.com/swlh/image-processing-with-python-connected-components-and-region-labeling-3eef1864b951
 
 square = np.ones((3, 3))
@@ -28,7 +28,7 @@ def multi_ero(im, num, element=square):
 #        return imageio.imread(f)
 
 if __name__ == "__main__":
-    img = imread("/users/yliang51/data/yliang51/NOF/Neural-Scene-Flow-Fields/nsff_exp/logs/experiment_skating_sal_multi_F00-30/cluster_2D_flow-010_path_360001/6_clu.png")
+    img = cv2.imread("/users/yliang51/data/yliang51/NOF/Neural-Scene-Flow-Fields/nsff_exp/logs/experiment_skating_sal_multi_F00-30/cluster_2D_flow-010_path_360001/6_clu.png")
     #assert False, imsave("test.png", img)
     #assert False, img.shape
     #(288, 54x, 3)
@@ -107,6 +107,6 @@ if __name__ == "__main__":
         tmp[img == idx] = color
     tmp[to_collapse, :] *= 0 
     #assert False, imsave("test.png", tmp)
-    imsave("out.png", tmp)
-    
+    #imsave("out.png", tmp)
+    cv2.imwrite("out.png", tmp)
 

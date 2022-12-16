@@ -13,8 +13,14 @@ import cv2
 
 import pydensecrf.densecrf as dcrf
 from pydensecrf.utils import unary_from_labels, create_pairwise_bilateral, create_pairwise_gaussian
-
-
+def config_parser():
+    import configargparse
+    parser = configargparse.ArgumentParser()
+    parser.add_argument("--compact_depth", type=str, default="20")
+    parser.add_argument("--compact_rgb", type=str, default="10")
+    parser.add_argument("--sdim_depth", type=str, default="40")
+    parser.add_argument("--sdim_rgb", type=str, default="40")
+    return parser
 #https://medium.com/swlh/image-processing-with-python-connected-components-and-region-labeling-3eef1864b951
 
 
@@ -25,6 +31,16 @@ from pydensecrf.utils import unary_from_labels, create_pairwise_bilateral, creat
 #        return imageio.imread(f)
 
 if __name__ == "__main__":
+
+    parser = config_parser()
+    args = parser.parse_args()
+    
+    args.compact_depth = int(args.compact_depth)
+    args.compact_rgb = int(args.compact_rgb)
+    args.sdim_depth = int(args.sdim_depth)
+    args.sdim_rgb = int(args.sdim_rgb)
+    
+    
     scenes = ["Umbrella", "Skating-2", "DynamicFace-2", "Truck-2", "Balloon1-2", 
     "Balloon2-2", "playground", "Jumping",]
     render_map = {
@@ -37,8 +53,9 @@ if __name__ == "__main__":
         "Truck-2": "../../Neural-Scene-Flow-Fields/nsff_exp/logs/experiment_truck_sal_multi_F00-30/render_2D-010_path_360001",
         "Umbrella": "../../Neural-Scene-Flow-Fields/nsff_exp/logs/experiment_Umbrella_sal_multi_F00-30/render_2D-010_path_360001"
         }
-    root_dir = "../../data/ours_1018"
-    out_dir = root_dir + "_processed_crf"
+    root_dir = "../../data/no_sal/oracle"
+    out_dir = root_dir + f"_crfs/{args.compact_depth}_{args.compact_rgb}_{args.sdim_depth}_{args.sdim_rgb}"
+    
     for scene in tqdm(scenes):
         
         assert os.path.exists(os.path.join(root_dir, scene))
@@ -69,14 +86,14 @@ if __name__ == "__main__":
             d.addPairwiseEnergy(feats, compat=15,
                         kernel=dcrf.DIAG_KERNEL,
                         normalization=dcrf.NORMALIZE_SYMMETRIC)
-            feats = create_pairwise_bilateral(sdims=(40, 40), schan=(13, 13, 13),
+            feats = create_pairwise_bilateral(sdims=(args.sdim_depth, args.sdim_depth), schan=(13, 13, 13),
                         img=depth_img, chdim=2)
-            d.addPairwiseEnergy(feats, compat=30,
+            d.addPairwiseEnergy(feats, compat=args.compact_depth,
                         kernel=dcrf.DIAG_KERNEL,
                         normalization=dcrf.NORMALIZE_SYMMETRIC)
-            feats = create_pairwise_bilateral(sdims=(20, 20), schan=(13, 13, 13),
+            feats = create_pairwise_bilateral(sdims=(args.sdim_rgb, args.sdim_rgb), schan=(13, 13, 13),
                         img=rgb_img, chdim=2)
-            d.addPairwiseEnergy(feats, compat=20,
+            d.addPairwiseEnergy(feats, compat=args.compact_rgb,
                         kernel=dcrf.DIAG_KERNEL,
                         normalization=dcrf.NORMALIZE_SYMMETRIC)
 

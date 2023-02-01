@@ -8,8 +8,8 @@ import json
 
 if __name__ == '__main__':
     
-    vis_folder = "/mnt/d/Research/NOF/data/ours_1018"
-    gt_folder = "/mnt/d/Research/NOF/data/gt_masks"
+    vis_folder = "/users/yliang51/data/yliang51/NOF/data/ours_1018_processed_crf"
+    gt_folder = "/users/yliang51/data/yliang51/NOF/data/gt_masks"
 
     result = {
         
@@ -35,6 +35,7 @@ if __name__ == '__main__':
             #assert False, [pred_masks.shape, np.unique(pred_masks)]
         for num in range(24):
             gt_mask = cv2.imread(os.path.join(gt_folder, scene, "training_%2d.png" % num), cv2.IMREAD_GRAYSCALE)
+            assert gt_mask is not None, os.path.join(gt_folder, scene, "training_%2d.png" % num)
             gt_mask = gt_mask.astype(int)
             gt_mask[gt_mask == 0] = -1
             #if num == 0:

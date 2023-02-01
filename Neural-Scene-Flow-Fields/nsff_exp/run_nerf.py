@@ -244,6 +244,9 @@ def config_parser():
 
     parser.add_argument("--use_multi_dino_single_sal", action="store_true", help="whether use multi-resolution dino and single-level saliency")
 
+    parser.add_argument('--disable_rigid', action="store_true", help="whether to only use dynamic model")
+
+
     return parser
 
 
@@ -1503,6 +1506,8 @@ def train():
                                 + torch.mean(torch.abs(ret['raw_prob_ref2post'])))
 
         # dynamic rendering loss
+        #if i % 100 == 99:
+        #    assert False, "I am learning!"
         if i <= decay_iteration * 1000:
             # dynamic rendering loss
             render_loss = img2mse(ret['rgb_map_ref_dy'], target_rgb)

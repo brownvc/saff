@@ -8,7 +8,7 @@ import json
 
 if __name__ == '__main__':
     
-    vis_folder = "/users/yliang51/data/yliang51/NOF/data/VIS_results"
+    vis_folder = "/users/yliang51/data/yliang51/NOF/data/VIS_results_davis"
     gt_folder = "/users/yliang51/data/yliang51/NOF/data/gt_masks"
 
     mapper_1 = {
@@ -54,6 +54,11 @@ if __name__ == '__main__':
             11: 3,
 
             }
+
+    for key in mapper_1:
+        mapper_1[key] = key
+    for key in mapper_2:
+        mapper_2[key] = key
 
     result = {
         

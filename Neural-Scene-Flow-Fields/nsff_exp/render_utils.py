@@ -3777,10 +3777,13 @@ def create_nerf(dino_ch, args):
     grad_vars = list(model.parameters())
 
     embed_fn_rigid, input_rigid_ch = get_embedder(args.multires, args.i_embed, 3)
+    
     model_rigid = Rigid_NeRF(use_tanh=args.use_tanh, shallow_dino=args.shallow_dino, dino_ch=dino_ch, use_sal=args.sal_coe > 0, D=args.netdepth, W=args.netwidth,
                              input_ch=input_rigid_ch, output_ch=output_ch, skips=skips,
                              input_ch_views=input_ch_views, 
-                             use_viewdirs=args.use_viewdirs).to(device)
+                             use_viewdirs=args.use_viewdirs,
+                             disable_rigid=args.disable_rigid).to(device)
+    #assert False, model_rigid.disable_rigid
 
     model_rigid = torch.nn.DataParallel(model_rigid, device_ids=device_ids)
 

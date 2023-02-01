@@ -184,7 +184,7 @@ class NeRF(nn.Module):
 
 # Model
 class Rigid_NeRF(nn.Module):
-    def __init__(self, use_tanh, shallow_dino, dino_ch, use_sal, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=True):
+    def __init__(self, use_tanh, shallow_dino, dino_ch, use_sal, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=True, disable_rigid=False):
         """ 
         """
         super(Rigid_NeRF, self).__init__()
@@ -198,6 +198,7 @@ class Rigid_NeRF(nn.Module):
         self.input_ch_views = input_ch_views
         self.skips = skips
         self.use_viewdirs = use_viewdirs
+        self.disable_rigid = disable_rigid
         
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
@@ -242,6 +243,8 @@ class Rigid_NeRF(nn.Module):
                 h = torch.cat([input_pts, h], -1)
 
         v = nn.functional.sigmoid(self.w_linear(h))
+        if self.disable_rigid:
+            v = v*0. + 1.
 
         if self.use_viewdirs:
             alpha = self.alpha_linear(h)

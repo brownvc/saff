@@ -57,6 +57,9 @@ def config_parser():
                         help="cluster point cloud in 3D ")
     parser.add_argument("--cluster_2D", action="store_true",
                         help="cluster on 2D rendered result ")
+    parser.add_argument("--render_pcd", action="store_true",
+                        help="render on 3D the clustering result ")
+    
     parser.add_argument("--cluster_2D_flow", action="store_true",
                         help="cluster on 2D rendered result with optical flow")
 
@@ -80,7 +83,8 @@ def config_parser():
 
     parser.add_argument("--render_2D", action="store_true",
                         help="Store 2D rendering result")
-
+    parser.add_argument("--use_pcd", action="store_true",
+                        )
 
     parser.add_argument("--final_height", type=int, default=288, 
                         help='training image height, default is 512x288')
@@ -251,7 +255,7 @@ def config_parser():
 
 
 def train():
-
+    #assert False, "Pause"
     parser = config_parser()
     args = parser.parse_args()
 
@@ -744,7 +748,7 @@ def train():
 
         return
     if args.render_slowmo_full:
-        assert False, "axis may be wrong due to saliency channel!!!"
+        #assert False, "axis may be wrong due to saliency channel!!!"
         print('RENDER SLOW MOTION') 
         curr_ts = 0
         render_poses = poses #torch.Tensor(poses).to(device)
@@ -897,6 +901,8 @@ def train():
             testsavedir += "_pos"
         if args.use_time:
             testsavedir += "_time"
+        if args.use_pcd:
+            testsavedir += "_pcd"
         os.makedirs(testsavedir, exist_ok=True)
         #assert args.load_algo != '' and os.path.exists(args.load_algo), "must have valid cluster stored"
         #assert False, [load_algo, n_clusters]
@@ -931,6 +937,48 @@ def train():
                 index = None
                 salient_labels = None
                 label_mapper = None
+            if args.use_pcd:
+                try:
+                    #index = faiss.index_cpu_to_gpu(res, 0, faiss.read_index(os.path.join(basedir, expname, 'cluster_2D-%03d'%\
+                    #                target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start), "large.index")))
+                    pcdsavedir = os.path.join(basedir, expname, 
+                            'cluster_pcd-%03d'%\
+                            target_idx + '_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+    
+                    index = faiss.read_index(os.path.join(pcdsavedir, "large.index"))
+                    #print("I am here!")
+                    salient_labels = np.load(os.path.join(pcdsavedir, "salient.npy"))
+                    #print("I am here!")
+                    if not args.no_merge:
+                        #assert label_mapper is not None
+                        label_mapper = pickle.load(open(os.path.join(pcdsavedir, "label_mapper.pkl"), "rb"))
+                    else:
+                        label_mapper = None
+                    #print("I am here!")
+                except:
+                    index = None
+                    salient_labels = None
+                    label_mapper = None
+
+            if args.render_pcd:
+                assert index is not None 
+                assert salient_labels is not None 
+                if not args.no_merge:
+                    assert label_mapper is not None
+                print("painting point clouds")
+                render_pcd(render_poses,
+                hwf, args.chunk, render_kwargs_test,
+                dino_weight=args.dino_weight,
+                            flow_weight=args.flow_weight,
+                            index = index,
+                            salient_labels = salient_labels,
+                            label_mapper = label_mapper,
+                             render_factor=args.render_factor, 
+                            
+                            
+                ) 
+                return
+            
             if args.render_mode:
                 assert index is not None 
                 assert salient_labels is not None 

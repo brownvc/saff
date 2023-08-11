@@ -4,7 +4,7 @@
 
 Official Implementation for "Semantic Attention Flow Fields for Monocular Dynamic Scene Decomposition".
 
-[[```Paper```](https://arxiv.org/abs/2303.01526)]  [[```Project```](https://visual.cs.brown.edu/projects/semantic-attention-flow-fields-webpage/)] [[```Data```](#download-data,-checkpoints-and-results)]
+[[```Paper```](https://arxiv.org/abs/2303.01526)]  [[```Project```](https://visual.cs.brown.edu/projects/semantic-attention-flow-fields-webpage/)] [[```Data```](#download-data-checkpoints-and-results)]
 
 ## Installation
 

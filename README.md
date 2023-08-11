@@ -20,11 +20,12 @@ We tested our code with 1 single RTX3090 / A6000.
 
 [NVIDIA dataset](https://drive.google.com/drive/folders/1JNhhRt9VAFXnQeoykpgTc35ByDZGkO6v?usp=drive_link)
 
+
+```gt_masks.zip```: segmentation annotation for NVIDIA dataset
+
 ```ours_1018_processed_crf.zip```: final results on NVIDIA dataset
 
 ```nvidia_data_full.zip```: processed NVIDIA dataset for training and testing
-
-```gt_masks.zip```: segmentation annotation for NVIDIA dataset
 
 ```checkpoints.zip```: trained models for NIVIDIA dataset
 
@@ -42,6 +43,16 @@ We tested our code with 1 single RTX3090 / A6000.
 | Skating-2  | nvidia_data_full/Skating-2  | https://github.com/brownvc/NOF/blob/camera_ready/Neural-Scene-Flow-Fields/nsff_exp/configs/config_skating-2_4.txt  | checkpoints/Skating-2/360000.tar  |
 | Truck  | nvidia_data_full/Truck-2  | https://github.com/brownvc/NOF/blob/camera_ready/Neural-Scene-Flow-Fields/nsff_exp/configs/config_truck2_4.txt  | checkpoints/Truck/360000.tar  |
 | Umbrella  | nvidia_data_full/Umbrella  | https://github.com/brownvc/NOF/blob/camera_ready/Neural-Scene-Flow-Fields/nsff_exp/configs/config_umbrella_4.txt  | checkpoints/Umbrella/360000.tar  |
+
+For usage, Data and Checkpoints should be put to corresponding location according to config files.
+
+```cd [path/to/repo]/Neural-Scene-Flow-Fields/``` 
+
+Data folder should be renamed as ```datadir```.
+
+Checkpoint should be put under ```basedir/expname```.
+
+
 
 
 ## Workflow 
@@ -114,8 +125,24 @@ This would create a new folder under scene folder:
 |       ├──...
 ```
 
+### Oracle Vote Using GT mask
 
-### Collect Results (NVIDIA dataset only)
+```python postprocess_oracle.py --raw_folder [path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/cluster_2D-010_path_[last_ckpt_id+1]/no_salient --gt_folder [path/to/this/scene/mask] [--flip_fg]```
+
+If use Black to denote background, need ```--flip_fg``` flag.
+
+This would create a new folder ```oracle``` under ```no_salient``` folder.
+
+### CRF postprocessing
+
+Note: ```[path/to/your/final/result]``` could be your default clustering result folder ```[path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/cluster_2D-010_path_[last_ckpt_id+1]/final``` or oracle processed folder ```[path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/cluster_2D-010_path_[last_ckpt_id+1]/no_salient/oracle```.
+
+```python postprocess_per_scene.py --root_dir [path/to/your/final/result]```
+
+```python postprocess_crf_per_scene.py --root_dir [path/to/your/final/result]_processed --render_dir [path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/render_2D-010_path_[last_ckpt_id+1]```
+
+## Collect Results for NVIDIA dataset
+
 
 First organize all scene's final clustering result(```[path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/cluster_2D-010_path_[last_ckpt_id+1]/final```) and final rgb rendering result(```[path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/render_2D-010_path_[last_ckpt_id+1]/*_rgb.png```) under the same folder:
 ```

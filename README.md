@@ -4,7 +4,7 @@
 
 Official Implementation for "Semantic Attention Flow Fields for Monocular Dynamic Scene Decomposition".
 
-[[```Paper```](https://arxiv.org/abs/2303.01526)]  [[```Project```](https://visual.cs.brown.edu/projects/semantic-attention-flow-fields-webpage/)]
+[[```Paper```](https://arxiv.org/abs/2303.01526)]  [[```Project```](https://visual.cs.brown.edu/projects/semantic-attention-flow-fields-webpage/)] [[```Data```](#download-data,-checkpoints-and-results)]
 
 ## Installation
 
@@ -16,7 +16,7 @@ pip install -r [path/to/repo]/requirements.txt
 
 We tested our code with 1 single RTX3090 / A6000.
 
-## Downloada Data, Checkpoints and Results
+## Download Data, Checkpoints and Results
 
 [NVIDIA dataset](https://drive.google.com/drive/folders/1JNhhRt9VAFXnQeoykpgTc35ByDZGkO6v?usp=drive_link)
 

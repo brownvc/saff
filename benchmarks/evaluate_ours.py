@@ -10,7 +10,9 @@ import json
 def config_parser():
     import configargparse
     parser = configargparse.ArgumentParser()
-    parser.add_argument("--vis_folder", type=str, default="../data/ours_1018")
+    parser.add_argument("--vis_folder", type=str, default="../data/ours_1018_processed_crf")
+    parser.add_argument("--gt_folder", type=str, default="../data/gt_masks")
+    
     #parser.add_argument("--compact_rgb", type=str, default="20")
     #parser.add_argument("--sdim_depth", type=str, default="40")
     #parser.add_argument("--sdim_rgb", type=str, default="20")
@@ -25,8 +27,8 @@ if __name__ == '__main__':
     #assert False, vis_folder
     
     #vis_folder = "../data/ours_1018-multisal-edge"
-    gt_folder = "../data/gt_masks"
-
+    #gt_folder = "../data/gt_masks"
+    gt_folder = args.gt_folder
     result = {
         
         }

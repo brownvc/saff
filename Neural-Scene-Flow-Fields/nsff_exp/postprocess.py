@@ -13,6 +13,12 @@ import cv2
 
 #https://medium.com/swlh/image-processing-with-python-connected-components-and-region-labeling-3eef1864b951
 
+def config_parser():
+    import configargparse
+    parser = configargparse.ArgumentParser()
+    parser.add_argument("--root_dir", type=str, required=True)
+    return parser
+
 square = np.ones((3, 3))
 def multi_dil(im, num, element=square):
     for i in range(num):
@@ -30,7 +36,11 @@ def multi_ero(im, num, element=square):
 
 if __name__ == "__main__":
     scenes = ["DynamicFace-2", "Truck-2","Umbrella", "Balloon1-2", "Balloon2-2", "playground", "Jumping", "Skating-2", ]
-    root_dir = "../../data/ours_1018"
+    parser = config_parser()
+    args = parser.parse_args()
+    #root_dir = "../../data/ours_1018"
+    root_dir = args.root_dir
+    
     out_dir = root_dir + "_processed"
     for scene in tqdm(scenes):
         

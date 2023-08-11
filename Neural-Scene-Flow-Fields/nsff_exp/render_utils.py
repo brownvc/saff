@@ -2592,15 +2592,28 @@ def cluster_2D(render_poses,
         "points": None
 
     }
-    render_poses = render_poses[:24]
-    if render_mode:
-        render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
-        #assert False, render_poses.shape
-        times = list(range(24)) + list(range(24)) + [0]*12
-    else:
-        times = list(range(24))
 
-    num_img = 24.  
+    if len(render_poses) == 48:
+        render_poses = render_poses[:48]
+        num_img = float(render_poses.shape[0])
+        if render_mode:
+            render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 48, axis=0)], axis=0)
+            times = list(range(48)) + list(range(48))
+        else:
+            render_poses = np.concatenate([render_poses[2*i:2*i+1] for i in range(24)], axis=0)
+            times = [2*i+1 for i in range(24)]
+
+    else:
+        render_poses = render_poses[:24]
+        num_img = float(render_poses.shape[0])
+        if render_mode:
+            render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
+            #assert False, render_poses.shape
+            times = list(range(24)) + list(range(24)) + [0]*12
+        else:
+            times = list(range(24))
+
+        #num_img = 24.  
     #num_img = 2
     
     '''store all non-opaque points and shuffle'''
@@ -3705,12 +3718,19 @@ def render_2D(render_poses,
     }
     
 
-    render_poses = render_poses[:24]
-    render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
-    times = list(range(24)) + list(range(24)) + [0]*12
+    if len(render_poses) == 48:
+        render_poses = render_poses[:48]
+        num_img = float(render_poses.shape[0])
+        render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 48, axis=0)], axis=0)
+        times = list(range(48)) + list(range(48))
+    else:
+        render_poses = render_poses[:24]
+        num_img = float(render_poses.shape[0])
+        render_poses = np.concatenate([render_poses, np.repeat(render_poses[:1], 24, axis=0), render_poses[:12]], axis=0)
+        times = list(range(24)) + list(range(24)) + [0]*12
     
 
-    num_img = 24.  
+    #num_img = 24.  
     #num_img = 2
     
     '''store all non-opaque points and shuffle'''

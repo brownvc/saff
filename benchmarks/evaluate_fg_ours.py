@@ -6,11 +6,22 @@ import os
 import torch
 import json
 
+def config_parser():
+    import configargparse
+    parser = configargparse.ArgumentParser()
+    parser.add_argument("--vis_folder", type=str, default="../data/ours_1018_processed_crf")
+    parser.add_argument("--gt_folder", type=str, default="../data/gt_masks")
+    #parser.add_argument("--compact_rgb", type=str, default="20")
+    #parser.add_argument("--sdim_depth", type=str, default="40")
+    #parser.add_argument("--sdim_rgb", type=str, default="20")
+    return parser
+
 if __name__ == '__main__':
     
-    vis_folder = "/users/yliang51/data/yliang51/NOF/data/ours_1018_processed_crf"
-    gt_folder = "/users/yliang51/data/yliang51/NOF/data/gt_masks"
-
+    #vis_folder = "/users/yliang51/data/yliang51/NOF/data/ours_1018_processed_crf"
+    vis_folder = args.vis_folder
+    #gt_folder = "/users/yliang51/data/yliang51/NOF/data/gt_masks"
+    gt_folder = args.gt_folder
     result = {
         
         }

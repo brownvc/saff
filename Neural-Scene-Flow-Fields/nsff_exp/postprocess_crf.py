@@ -16,6 +16,7 @@ from pydensecrf.utils import unary_from_labels, create_pairwise_bilateral, creat
 def config_parser():
     import configargparse
     parser = configargparse.ArgumentParser()
+    parser.add_argument("--root_dir", type=str, required=True)
     parser.add_argument("--compact_depth", type=str, default="20")
     parser.add_argument("--compact_rgb", type=str, default="10")
     parser.add_argument("--sdim_depth", type=str, default="40")
@@ -39,6 +40,7 @@ if __name__ == "__main__":
     args.compact_rgb = int(args.compact_rgb)
     args.sdim_depth = int(args.sdim_depth)
     args.sdim_rgb = int(args.sdim_rgb)
+    root_dir = args.root_dir
     
     
     scenes = ["Umbrella", "Skating-2", "DynamicFace-2", "Truck-2", "Balloon1-2", 
@@ -53,7 +55,7 @@ if __name__ == "__main__":
         "Truck-2": "../../Neural-Scene-Flow-Fields/nsff_exp/logs/experiment_truck_sal_multi_F00-30/render_2D-010_path_360001",
         "Umbrella": "../../Neural-Scene-Flow-Fields/nsff_exp/logs/experiment_Umbrella_sal_multi_F00-30/render_2D-010_path_360001"
         }
-    root_dir = "../../data/no_sal/oracle"
+    #root_dir = "../../data/no_sal/oracle"
     out_dir = root_dir + f"_crfs/{args.compact_depth}_{args.compact_rgb}_{args.sdim_depth}_{args.sdim_rgb}"
     
     for scene in tqdm(scenes):

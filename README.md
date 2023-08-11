@@ -14,6 +14,8 @@ source <env_name>/bin/activate
 pip install -r [path/to/repo]/requirements.txt
 ```
 
+We tested our code with 1 single RTX3090 / A6000.
+
 ## Downloada Data, Checkpoints and Results
 
 [NVIDIA dataset](https://drive.google.com/drive/folders/1JNhhRt9VAFXnQeoykpgTc35ByDZGkO6v?usp=drive_link)
@@ -42,7 +44,7 @@ pip install -r [path/to/repo]/requirements.txt
 | Umbrella  | nvidia_data_full/Umbrella  | https://github.com/brownvc/NOF/blob/camera_ready/Neural-Scene-Flow-Fields/nsff_exp/configs/config_umbrella_4.txt  | checkpoints/Umbrella/360000.tar  |
 
 
-## Workflow for NVIDIA Dataset
+## Workflow 
 
 ```cd [path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp```
 
@@ -75,6 +77,13 @@ This would create a new folder under scene folder:
 |       ├──...
 ```
 
+#### Split (Shared by all sections):
+* ```0-23```: training views
+
+* ```24-47```: fixed camera 0, moving times
+
+* ```48-59```: moving camera, fixed time = 0
+
 ### After Training, cluster per-view
 ```python run_nerf.py --config [path/to/config/file] --cluster_2D```
 
@@ -106,7 +115,7 @@ This would create a new folder under scene folder:
 ```
 
 
-### Collect Results
+### Collect Results (NVIDIA dataset only)
 
 First organize all scene's final clustering result(```[path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/cluster_2D-010_path_[last_ckpt_id+1]/final```) and final rgb rendering result(```[path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/render_2D-010_path_[last_ckpt_id+1]/*_rgb.png```) under the same folder:
 ```
@@ -125,7 +134,7 @@ First organize all scene's final clustering result(```[path/to/repo]/Neural-Scen
 ```
 
 
-### PostProcessing
+### PostProcessing (NVIDIA dataset only)
 
 #### NOTE: 
 for now only supports NVIDIA scene organization!
@@ -136,7 +145,7 @@ for now only supports NVIDIA scene organization!
 
 Now the results would be stored in folder ```[path/to/results]_processed_crf```.
 
-### Evaluation
+### Evaluation (NVIDIA dataset only)
 for now only supports NVIDIA scene organization!
 
 ```cd [path/to/repo]/benchmarks```
@@ -144,6 +153,111 @@ for now only supports NVIDIA scene organization!
 ```python evaluate_fg_ours.py --vis_folder [path/to/results]_processed_crf --gt_folder [path/to/gt_masks```
 
 ```python evaluate_ours.py --vis_folder [path/to/results]_processed_crf --gt_folder [path/to/gt_masks```
+
+## Use SAFF on your own data
+
+### Step 1. Data prepration
+Collect rgb image sequence and corresponding dynamic masks, organize like:
+```
+├── [path/to/data]
+|   ├──images
+|       ├──00000.png 
+|       ├──00001.png
+|       ├──...
+|   ├──colmap_masks
+|       ├──00000.png.png
+|       ├──00001.png.png
+|       ├──...
+```
+Note: Naming has to follow ```%05d``` format!
+
+```colmap_masks``` is where we store foreground masks. Dynamic Foreground -> black. Static Background -> white.
+
+### Step 2. run COLMAP
+
+Make sure you have colmap installed on your machine.
+
+For example, on Mac, run
+```sudo zsh colmap.sh [path/to/data]```
+
+After running, the same data folder looks like: 
+```
+├── [path/to/data]
+|   ├──images
+|       ├──...
+|   ├──colmap_masks
+|       ├──...
+|   ├──dense
+|       ├──...
+|   ├──sparse
+|       ├──...
+|   ├──database.db
+|   ├──database.db-shm
+|   ├──database.db-wal
+```
+
+```[path/to/data]/dense``` is the final data we want.
+
+### Step 3. calculate pseudo depth and optical flow for supervision
+
+```cd [path/to/repo]/Neural-Scene-Flow-Fields/nsff_scripts```
+
+```python save_poses_nerf.py --data_path "[path/to/data]/dense/"```
+
+Download single view depth prediction model ```model.pt``` from [link](https://drive.google.com/drive/folders/1G-NFZKEA8KSWojUKecpJPVoq5XCjBLOV?usp=sharing), and put it under the folder ```nsff_scripts```.
+
+```python run_midas.py --data_path "[path/to/data]/dense/" [--resize_height ???] # use resize_height if data is over big for SAFF ```
+
+Download RAFT model ```raft-things.pth``` from [link](https://drive.google.com/drive/folders/1sWDsfuZ3Up38EUQt7-JDTT1HcGHuJgvT?usp=sharing), and put it under the folder ```nsff_scripts/models```.
+
+```python run_flows_video.py --model models/raft-things.pth --data_path [path/to/data]/dense/```
+
+
+After running, the same data folder looks like: 
+```
+├── [path/to/data]
+|   ├──images
+|       ├──...
+|   ├──colmap_masks
+|       ├──...
+|   ├──dense
+|       ├──disp
+|           ├──...
+|       ├──flow_i1
+|           ├──...
+|       ├──images
+|           ├──...
+|       ├──images_306x400
+|           ├──...
+|       ├──motion_masks
+|           ├──...
+|       ├──sparse
+|           ├──...
+|       ├──stereo
+|           ├──...
+|       ├──poses_bounds.npy
+|       ├──run-colmap-geometric.sh
+|       ├──run-colmap-photometric.sh
+|       ├──scene.json
+|   ├──sparse
+|       ├──...
+|   ├──database.db
+|   ├──database.db-shm
+|   ├──database.db-wal
+```
+
+### Step 4. Create Config file 
+
+copy config file [template](https://github.com/brownvc/NOF/blob/camera_ready/Neural-Scene-Flow-Fields/nsff_exp/configs/config_balloon1-2_4.txt), and change the value of field:
+* ```expname```: to be your expname
+* ```datadir```: to your [path/to/data]/dense
+* ```final_height```: this must be same as --resize_height argument in run_midas.py
+* ```start_frame```, ```end_frame```: which images would 
+participate in training according to image id.
+
+Note: if end_frame - start_frame == 48, would filter out half of the images for testing. (for DyCheck's sake)
+
+#### Then you are all set! 
 
 ## Reference 
 * https://github.com/gaochen315/DynamicNeRF

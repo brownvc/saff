@@ -2881,7 +2881,10 @@ def cluster_2D(render_poses,
     for c2 in range(len(centroids)):
         for c1 in range(c2):
             if sims[c1, c2] > similarity_thresh:
-                label_mapper[c2] = c1
+                if c1 in label_mapper:
+                    label_mapper[c2] = label_mapper[c1]
+                else:
+                    label_mapper[c2] = c1
                 break    
     pickle.dump(label_mapper, open(os.path.join(savedir, "label_mapper.pkl"), 'wb'))
     #assert False

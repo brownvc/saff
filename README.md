@@ -8,10 +8,41 @@ Official Implementation for "Semantic Attention Flow Fields for Monocular Dynami
 
 ## Installation
 
+Tested with System Spec:
+
 ```
-virtualenv <env_name>
+python==3.7.4
+cmake==3.20.0
+gcc==10.2
+cuda==11.3.1
+cudnn==8.2.0 
+```
+
+Steps:
+```
+python3 -m venv <env_name>
 source <env_name>/bin/activate
+
+pip install --upgrade pip
+
 pip install -r [path/to/repo]/requirements.txt
+
+# install eigen using apt-get if can; otherwise compile from source:
+cd <folder to store tmp file>
+wget https://gitlab.com/libeigen/eigen/-/archive/master/eigen-master.tar.gz
+tar -xzf eigen-master.tar.gz
+cd eigen-master
+rm -rf build
+mkdir build
+cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=<env_name>
+make -j8
+make install
+
+#install pydensecrf
+pip3 install --force-reinstall cython==0.29.36
+pip install --no-build-isolation git+https://github.com/lucasb-eyer/pydensecrf.git
+
 ```
 
 We tested our code with 1 single RTX3090 / A6000.
@@ -141,6 +172,8 @@ Note: ```[path/to/your/final/result]``` could be your default clustering result 
 
 ```python postprocess_crf_per_scene.py --root_dir [path/to/your/final/result]_processed --render_dir [path/to/repo]/Neural-Scene-Flow-Fields/nsff_exp/logs/[your/exp/name]_F[start_frame]_[end_frame]/render_2D-010_path_[last_ckpt_id+1]```
 
+
+
 ## Collect Results for NVIDIA dataset
 
 
@@ -177,9 +210,9 @@ for now only supports NVIDIA scene organization!
 
 ```cd [path/to/repo]/benchmarks```
 
-```python evaluate_fg_ours.py --vis_folder [path/to/results]_processed_crf --gt_folder [path/to/gt_masks```
+```python evaluate_fg_ours.py --vis_folder [path/to/results]_processed_crf --gt_folder [path/to/gt_masks]```
 
-```python evaluate_ours.py --vis_folder [path/to/results]_processed_crf --gt_folder [path/to/gt_masks```
+```python evaluate_ours.py --vis_folder [path/to/results]_processed_crf --gt_folder [path/to/gt_masks]```
 
 ## Use SAFF on your own data
 

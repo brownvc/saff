@@ -1,4 +1,4 @@
-# Semantic Attention Flow Fields for Monocular Dynamic Scene Decomposition (ICCV 2023)  <img src="https://visual.cs.brown.edu/projects/semantic-attention-flow-fields-webpage/BrownCSLogo.png"  width="10%" height="10%">
+# Semantic Attention Flow Fields for Monocular Dynamic Scene Decomposition (ICCV 2023)  
 
 [Yiqing Liang](lynl7130.github.io), [Eliot Laidlaw](https://www.linkedin.com/in/eliot-laidlaw-472640197/), [Alexander Meyerowitz](https://www.linkedin.com/in/ameyerow/), [Srinath Sridhar](https://cs.brown.edu/people/ssrinath/), [James Tompkin](https://jamestompkin.com/)
 
@@ -49,7 +49,7 @@ We tested our code with 1 single RTX3090 / A6000.
 
 ## Download Data, Checkpoints and Results
 
-[NVIDIA dataset](https://drive.google.com/drive/folders/1JNhhRt9VAFXnQeoykpgTc35ByDZGkO6v?usp=drive_link)
+[Google Drive Link](https://drive.google.com/drive/folders/1dlO7TmUefTX97qtByMIDCnckCzgTjobC?usp=sharing)
 
 
 ```gt_masks.zip```: segmentation annotation for NVIDIA dataset
